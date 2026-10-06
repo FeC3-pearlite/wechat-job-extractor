@@ -101,7 +101,7 @@
 
 ## 四、准确度与已知限制
 
-**测试覆盖：74 项检查全部通过。**
+**测试覆盖：84 项检查全部通过。**
 
 | 测试套件 | 项数 | 覆盖内容 |
 | --- | --- | --- |
@@ -109,6 +109,7 @@
 | `tests/verify-manifest.cjs` | 15 | 清单自检：引用文件是否存在、注入顺序、图标有效性、`default_locale` 陷阱、快捷键格式 |
 | `tests/verify-panel.cjs` | 9 | 用最小 DOM 桩**真实执行**面板挂载与渲染，含 XSS 转义验证 |
 | `tests/verify-userscript.cjs` | 8 | 在**无 `module`/`document` 的纯净上下文**里加载打包后的 Userscript，并用真实夹具跑通 |
+| `tests/verify-dom-browser.cjs` | 10 | **无头 Edge 真实渲染夹具页**，执行内容脚本实际使用的 `parseDocument` 路径，并校验 DOM 路径与字符串路径结果一致 |
 
 必须说清楚的限制：
 
@@ -125,7 +126,7 @@
 ## 五、开发
 
 ```bash
-# 全部测试（74 项）
+# 全部测试（84 项）
 npm test
 
 # 分项跑
@@ -133,6 +134,7 @@ node tests/run-tests.cjs         # 核心逻辑 + 夹具回归
 node tests/verify-manifest.cjs   # 扩展清单自检
 node tests/verify-panel.cjs      # 面板 UI 渲染（最小 DOM 桩）
 node tests/verify-userscript.cjs # 打包后的 Userscript 制品
+node tests/verify-dom-browser.cjs# 无头 Edge 真实 DOM 解析路径（需本机有 Edge/Chrome）
 
 # 重新生成图标
 python tools/make-icons.py
