@@ -1,0 +1,20 @@
+{
+  "name": "wechat-job-extractor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "从微信公众号招聘推文中提取招聘主体、届别、岗位、投递截止时间与官方投递链接的浏览器扩展 / 用户脚本",
+  "keywords": ["wechat", "公众号", "校园招聘", "求职", "chrome-extension", "userscript"],
+  "license": "MIT",
+  "scripts": {
+    "test": "node tests/run-tests.cjs && node tests/verify-manifest.cjs && node tests/verify-panel.cjs && node tests/verify-userscript.cjs",
+    "test:core": "node tests/run-tests.cjs",
+    "test:manifest": "node tests/verify-manifest.cjs",
+    "test:panel": "node tests/verify-panel.cjs",
+    "test:dist": "node tests/verify-userscript.cjs",
+    "build": "node tools/build-userscript.cjs",
+    "icons": "python tools/make-icons.py"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

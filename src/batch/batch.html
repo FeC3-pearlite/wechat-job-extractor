@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>批量提取 · 微信求职信息提取器</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1f2329; background: #f7f8fa; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 22px 20px 60px; }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: #8a9099; font-size: 12px; margin-bottom: 16px; }
+  .card { background: #fff; border: 1px solid #eceef1; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  textarea { width: 100%; min-height: 108px; padding: 10px; border: 1px solid #d8dbe0; border-radius: 8px;
+             font: 12.5px/1.7 ui-monospace, Consolas, monospace; resize: vertical; }
+  textarea:focus { outline: none; border-color: #07c160; box-shadow: 0 0 0 3px rgba(7,193,96,.12); }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+  button { border: 1px solid #d8dbe0; background: #fff; color: #1f2329; border-radius: 7px; padding: 7px 14px;
+           font-size: 13px; cursor: pointer; font-family: inherit; }
+  button:hover:not(:disabled) { border-color: #07c160; color: #05874a; }
+  button.primary { background: #07c160; border-color: #07c160; color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #05a352; color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  label.chk { display: inline-flex; align-items: center; gap: 5px; color: #5b6270; font-size: 12.5px; }
+  input[type=number] { width: 72px; padding: 5px 8px; border: 1px solid #d8dbe0; border-radius: 6px; font-family: inherit; }
+
+  .bar { height: 6px; background: #eceef1; border-radius: 3px; overflow: hidden; margin-top: 14px; }
+  .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg,#07c160,#05a352); transition: width .25s; }
+  .stat { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: #8a9099; }
+  .stat b { color: #1f2329; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { padding: 9px 10px; text-align: left; border-bottom: 1px solid #f0f1f3; vertical-align: top; }
+  th { background: #fafbfc; color: #5b6270; font-weight: 600; white-space: nowrap; position: sticky; top: 0; z-index: 1; }
+  tr.done:hover { background: #fafbfc; }
+  td.u { max-width: 320px; word-break: break-all; }
+  td.u a { color: #0b6bcb; text-decoration: none; }
+  td.u a:hover { text-decoration: underline; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; white-space: nowrap; }
+  .pill.ok { background: #e8f7ee; color: #05874a; }
+  .pill.warn { background: #fff4e5; color: #b76b00; }
+  .pill.err { background: #fdecec; color: #c0392b; }
+  .pill.run { background: #eef2ff; color: #3b5bdb; }
+  .pill.wait { background: #f2f3f5; color: #8a9099; }
+  .empty { color: #8a9099; padding: 26px; text-align: center; }
+  .err { color: #c0392b; font-size: 11.5px; }
+  .hint { font-size: 11.5px; color: #8a9099; margin-top: 10px; }
+  details summary { cursor: pointer; color: #0b6bcb; font-size: 12px; }
+  details pre { max-height: 260px; overflow: auto; background: #fafbfc; border: 1px solid #eceef1;
+                border-radius: 6px; padding: 10px; font-size: 11.5px; white-space: pre-wrap; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>批量提取公众号招聘信息</h1>
+  <div class="sub">每行一个链接，支持 <code>https://mp.weixin.qq.com/s/xxxx</code> 形式的文章地址。结果可导出 CSV / Markdown / JSON。</div>
+
+  <div class="card">
+    <textarea id="urls" placeholder="https://mp.weixin.qq.com/s/L0z32NQpl2pgkzJB45Rq0Q
+https://mp.weixin.qq.com/s/mO92ovOOTLeIRDvtuTmvfA
+https://mp.weixin.qq.com/s/GJcUgble-Vhpti4XZQV61Q"></textarea>
+    <div class="row">
+      <button class="primary" id="run">开始抓取</button>
+      <button id="stop" disabled>停止</button>
+      <button id="clear">清空</button>
+      <label class="chk"><input type="checkbox" id="tabMode"> 标签页模式（更稳，需已登录微信）</label>
+      <label class="chk">间隔 <input type="number" id="delay" value="900" min="0" step="100"> ms</label>
+    </div>
+    <div class="bar"><i id="prog"></i></div>
+    <div class="stat">
+      <span>总计 <b id="s-total">0</b></span>
+      <span>成功 <b id="s-ok">0</b></span>
+      <span>失败 <b id="s-fail">0</b></span>
+      <span>待处理 <b id="s-wait">0</b></span>
+    </div>
+    <div class="hint" id="hint">
+      提示：扩展在后台直接抓取用的是你浏览器的登录态；若微信返回「环境异常」验证页，请改勾「标签页模式」——
+      它会在后台标签页里真实打开文章再解析，成功率最高。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin:0 0 12px">
+      <button id="dl-csv">导出 CSV</button>
+      <button id="dl-md">导出 Markdown</button>
+      <button id="dl-json">导出 JSON</button>
+      <button id="copy-links">复制全部投递链接</button>
+    </div>
+    <div id="tableBox"><div class="empty">还没有结果。粘贴链接后点「开始抓取」。</div></div>
+  </div>
+</div>
+
+<script src="../core/rules.js"></script>
+<script src="../core/parse.js"></script>
+<script src="../core/fields.js"></script>
+<script src="../core/format.js"></script>
+<script src="../core/extract.js"></script>
+<script src="batch.js"></script>
+</body>
+</html>

@@ -1,0 +1,80 @@
+{
+  "manifest_version": 3,
+  "name": "微信求职信息提取器",
+  "short_name": "WJE",
+  "version": "1.0.0",
+  "description": "从微信公众号招聘推文里一键提取招聘单位、届别、岗位、截止时间与官方投递链接，支持复制/导出 Markdown、JSON、CSV。",
+  "minimum_chrome_version": "102",
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs",
+    "downloads",
+    "contextMenus",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "https://mp.weixin.qq.com/*"
+  ],
+
+  "background": {
+    "service_worker": "src/background.js"
+  },
+
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "提取本页招聘关键信息",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "options_ui": {
+    "page": "src/options/options.html",
+    "open_in_tab": false
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mp.weixin.qq.com/s*"
+      ],
+      "js": [
+        "src/core/rules.js",
+        "src/core/parse.js",
+        "src/core/fields.js",
+        "src/core/format.js",
+        "src/core/extract.js",
+        "src/content/panel.js",
+        "src/content/content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "commands": {
+    "toggle-panel": {
+      "suggested_key": { "default": "Alt+Shift+E" },
+      "description": "显示/隐藏提取面板"
+    }
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*", "src/content/*"],
+      "matches": ["https://mp.weixin.qq.com/*"]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+# 构建产物与私钥
+
+# 扩展打包私钥：绝不能提交（泄露等于别人可以冒充你的扩展 ID 签名）
+*.pem
+*.key
+
+# 临时打包目录
+dist/_staging/
+
+# 依赖与缓存
+node_modules/
+.npm/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/

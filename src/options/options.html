@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>设置 · 微信求职信息提取器</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px; min-width: 420px; font: 13px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1f2329; background: #f7f8fa; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: #8a9099; font-size: 12px; margin-bottom: 16px; }
+  .card { background: #fff; border: 1px solid #eceef1; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .card h2 { font-size: 13px; margin: 0 0 10px; color: #5b6270; }
+  label.opt { display: flex; align-items: flex-start; gap: 9px; padding: 7px 0; cursor: pointer; }
+  label.opt input { margin-top: 3px; }
+  label.opt b { font-weight: 600; }
+  label.opt .d { display: block; color: #8a9099; font-size: 11.5px; }
+  .status { color: #05874a; font-size: 12px; margin-left: 10px; opacity: 0; transition: .2s; }
+  .status.show { opacity: 1; }
+  .welcome { background: #e8f7ee; border: 1px solid #b7e7cd; color: #05874a; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; font-size: 12.5px; }
+  .welcome b { display: block; font-size: 13px; margin-bottom: 4px; }
+  kbd { background: #f2f3f5; border: 1px solid #d8dbe0; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11.5px; font-family: inherit; }
+  code { background: #f2f3f5; border-radius: 3px; padding: 1px 5px; font-size: 11.5px; }
+  ul { margin: 6px 0 0; padding-left: 20px; color: #5b6270; font-size: 12.5px; }
+</style>
+</head>
+<body>
+  <h1>微信求职信息提取器 · 设置</h1>
+  <div class="sub">当前版本 1.0.0</div>
+
+  <div class="welcome" id="welcome" style="display:none">
+    <b>安装成功 🎉</b>
+    打开任意微信公众号招聘推文（mp.weixin.qq.com/s/…），右下角会出现「🔍 提取招聘信息」按钮；
+    点工具栏图标也能直接看结果。快捷键 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> 可开关面板。
+  </div>
+
+  <div class="card">
+    <h2>页面行为</h2>
+    <label class="opt"><input type="checkbox" id="autoBadge">
+      <span><b>显示悬浮按钮</b><span class="d">在公众号文章页右下角显示「提取招聘信息」按钮。</span></span></label>
+    <label class="opt"><input type="checkbox" id="autoPanel">
+      <span><b>打开文章时自动展开面板</b><span class="d">无需点击，进入文章即自动提取并展开结果。</span></span></label>
+    <label class="opt"><input type="checkbox" id="highlight">
+      <span><b>自动高亮正文关键词</b><span class="d">提取后自动把「投递 / 网申 / 截止 / 阅读原文」等词标黄。</span></span></label>
+  </div>
+
+  <div class="card">
+    <h2>支持的链接类型</h2>
+    <ul>
+      <li><code>https://mp.weixin.qq.com/s/&lt;id&gt;</code> —— 文章短链（推荐）</li>
+      <li><code>https://mp.weixin.qq.com/s?__biz=…&amp;mid=…&amp;idx=…&amp;sn=…</code> —— 文章长链</li>
+    </ul>
+    <div class="sub" style="margin:8px 0 0">「阅读原文」跳转、正文内链、以及微信 <code>/mp/redirect?url=</code> 中间页都会被自动解包成真实地址。</div>
+  </div>
+
+  <div class="card">
+    <h2>数据与隐私</h2>
+    <ul>
+      <li>所有解析都在你的浏览器本地完成，<b>不上传任何数据</b>，无第三方服务器。</li>
+      <li>批量模式直接使用你本机的微信登录态请求页面；标签页模式在后台标签页打开文章。</li>
+      <li>导出的 CSV 带 BOM，Excel 直接双击不乱码。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>已知限制</h2>
+    <ul>
+      <li><b>图片型推文</b>：不少银行校招推文正文是长图，文字极少。此时插件会明确提示，并把正文图片列出来；图片里的文字需要你自己看（或配合 OCR）。</li>
+      <li><b>截止时间</b>：原文只写「10月25日」这类不含年份时，插件按发布时间推断年份并标为「待确认」。</li>
+      <li><b>识别结果仅供参考</b>，投递前请以官方原文为准。</li>
+    </ul>
+  </div>
+
+  <button id="save" style="border:1px solid #07c160;background:#07c160;color:#fff;border-radius:7px;padding:8px 18px;font-size:13px;cursor:pointer;font-family:inherit">保存设置</button>
+  <span class="status" id="status">已保存 ✓</span>
+
+  <script src="options.js"></script>
+</body>
+</html>
