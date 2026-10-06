@@ -110,8 +110,10 @@ vm.createContext(sandbox);
 /* ------------------------------ 加载模块 ------------------------------ */
 
 const FILES = [
-  'src/core/rules.js', 'src/core/parse.js', 'src/core/fields.js',
-  'src/core/format.js', 'src/core/extract.js', 'src/content/panel.js'
+  'src/core/rules.js', 'src/core/classify.js', 'src/core/profiles/literature.js',
+  'src/core/parse.js', 'src/core/links.js', 'src/core/insights.js',
+  'src/core/profiles/recruit.js', 'src/core/profiles/general.js',
+  'src/core/fields.js', 'src/core/format.js', 'src/core/extract.js', 'src/content/panel.js'
 ];
 
 check('在最小 DOM 桩下加载 core + panel 不抛异常', () => {
@@ -159,12 +161,47 @@ check('render：正文区含投递入口、关键字段、关键句', () => {
   includes(bd, '关键句摘录', '缺少关键句段');
 });
 
-check('render：底部按钮齐全', () => {
+check('render：底部按钮齐全（招聘画像）', () => {
   const sh = bodyEl.children[0].shadowRoot;
   const ft = sh.querySelector('.ft').innerHTML;
-  ['复制 Markdown', '复制 JSON', '只复制投递链接', '下载 .md', '下载 .json', '高亮正文关键词'].forEach((b) => {
+  ['复制 Markdown', '复制主要链接', '复制 JSON', '下载 .md', '下载 .json', '高亮正文关键词'].forEach((b) => {
     includes(ft, b, '缺少按钮');
   });
+});
+
+check('render：文献画像展示原文链接、摘要与引用格式', () => {
+  const litFixture = fs.readFileSync(path.join(ROOT, 'tests/fixtures/literature-nature.html'), 'utf8');
+  const res = WJE.extract.fromHtml(litFixture, { nowYear: 2026 });
+  WJE.panel.render(res);
+  const sh = bodyEl.children[0].shadowRoot;
+  const bd = sh.querySelector('.bd').innerHTML;
+  includes(bd, '原文链接', '缺少原文链接段');
+  includes(bd, 'https://doi.org/10.1038/s41586-021-03819-2', '缺少 DOI 解析链接');
+  includes(bd, '论文信息', '缺少论文信息表');
+  includes(bd, 'Highly accurate protein structure prediction with AlphaFold', '缺少论文标题');
+  includes(bd, '摘要', '缺少摘要段');
+  includes(bd, '引用格式', '缺少引用格式段');
+  includes(bd, 'GB/T 7714', '缺少 GB/T 条目');
+  includes(bd, 'BibTeX', '缺少 BibTeX 条目');
+  // 类型徽标应显示为「文献阅读」
+  includes(sh.querySelector('.badge').textContent, '文献阅读', '类型徽标错误');
+  const ft = sh.querySelector('.ft').innerHTML;
+  ['复制 GB/T 引用', '复制 APA', '复制 BibTeX', '复制题录', '复制原文链接'].forEach((b) => {
+    includes(ft, b, '文献画像缺少按钮');
+  });
+});
+
+check('render：通用画像不套招聘字段', () => {
+  const general = WJE.extract.fromHtml(
+    '<html><head><title>关于调整办公时间的通知</title></head><body><div id="js_content">' +
+    '<p>各位同事：自下周一起办公时间调整为 9:00-18:00，请大家知悉。</p>' +
+    '<p>联系人：行政部，电话 010-12345678。</p></div></body></html>',
+    { nowYear: 2026 }
+  );
+  WJE.panel.render(general);
+  const bd = bodyEl.children[0].shadowRoot.querySelector('.bd').innerHTML;
+  includes(bd, '通用字段', '通用画像应展示通用字段表');
+  ok(bd.indexOf('投递入口') === -1, '通用画像不应出现「投递入口」段');
 });
 
 check('render：图片型推文会展示图片区与告警', () => {

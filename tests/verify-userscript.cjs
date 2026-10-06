@@ -38,8 +38,10 @@ check('包含 ==UserScript== 元数据头', () => {
 check('@match 指向微信文章页', () => {
   ok(/@match\s+https:\/\/mp\.weixin\.qq\.com\/s\*/.test(code), '缺少 @match');
 });
-check('内联了全部 6 个核心/UI 模块', () => {
-  ['core/rules', 'core/parse', 'core/fields', 'core/format', 'core/extract', 'content/panel'].forEach((m) => {
+check('内联了全部 12 个核心/UI 模块', () => {
+  ['core/rules', 'core/classify', 'core/profiles/literature', 'core/links', 'core/insights',
+    'core/profiles/recruit', 'core/profiles/general', 'core/parse', 'core/fields',
+    'core/format', 'core/extract', 'content/panel'].forEach((m) => {
     ok(code.indexOf('src/' + m + '.js') !== -1, '缺少模块 src/' + m + '.js');
   });
 });
@@ -48,7 +50,9 @@ check('不含裸 require 调用（只在 typeof module 分支内）', () => {
   let n = 0;
   while (idx !== -1) {
     n++;
-    const before = code.slice(Math.max(0, idx - 220), idx);
+    // 回溯窗口要足够大：fields.js / extract.js 的依赖对象里有 7~8 个 require，
+    // 最后一个距离 `typeof module` 已经超过 220 字符。
+    const before = code.slice(Math.max(0, idx - 900), idx);
     ok(/typeof\s+module/.test(before), '第 ' + n + ' 处 require( 不在 typeof module 分支内');
     idx = code.indexOf('require(', idx + 1);
   }

@@ -11,9 +11,17 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
 
+// 顺序与 manifest.content_scripts.js 保持一致。
+// （links.js 已改为调用时惰性解析依赖，顺序不再是正确性前提，但仍保持同一顺序便于核对。）
 const FILES = [
   'src/core/rules.js',
+  'src/core/classify.js',
+  'src/core/profiles/literature.js',
   'src/core/parse.js',
+  'src/core/links.js',
+  'src/core/insights.js',
+  'src/core/profiles/recruit.js',
+  'src/core/profiles/general.js',
   'src/core/fields.js',
   'src/core/format.js',
   'src/core/extract.js',
@@ -21,10 +29,10 @@ const FILES = [
 ];
 
 const HEADER = `// ==UserScript==
-// @name         微信求职信息提取器
+// @name         微信推文关键信息提取器
 // @namespace    https://github.com/FeC3-pearlite/wechat-job-extractor
 // @version      ${pkg.version}
-// @description  从微信公众号招聘推文里一键提取招聘单位、届别、岗位、投递截止时间与官方投递链接，可复制/下载 Markdown、JSON。
+// @description  自动判别公众号推文类型：招聘帖提取投递入口与截止时间，文献帖提取原文链接、作者、期刊、DOI 与引用格式，可导出 Markdown/JSON。
 // @author       FeC3-pearlite
 // @match        https://mp.weixin.qq.com/s*
 // @icon         data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2307c160'/%3E%3C/svg%3E

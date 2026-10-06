@@ -1,5 +1,5 @@
 /*!
- * 微信求职信息提取器 — 后台 Service Worker (background.js)
+ * 微信推文关键信息提取器 — 后台 Service Worker (background.js)
  * 负责：右键菜单、快捷键、首次安装打开引导页。
  */
 
@@ -9,7 +9,7 @@ chrome.runtime.onInstalled.addListener((details) => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: MENU_ID,
-      title: '提取本页招聘关键信息',
+      title: '提取本页关键信息（招聘 / 文献）',
       contexts: ['page'],
       documentUrlPatterns: ['https://mp.weixin.qq.com/s*']
     });

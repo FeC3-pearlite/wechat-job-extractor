@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>批量提取 · 微信求职信息提取器</title>
+<title>批量提取 · 微信推文关键信息提取器</title>
 <style>
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
@@ -42,6 +42,10 @@
   .pill.err { background: #fdecec; color: #c0392b; }
   .pill.run { background: #eef2ff; color: #3b5bdb; }
   .pill.wait { background: #f2f3f5; color: #8a9099; }
+  .pill.recruit { background: #e8f7ee; color: #05874a; margin-top: 3px; }
+  .pill.literature { background: #f3ecff; color: #6b3fd4; margin-top: 3px; }
+  .pill.general { background: #f2f3f5; color: #6b7280; margin-top: 3px; }
+  .pill.hybrid { background: #fff4e5; color: #b76b00; margin-top: 3px; }
   .empty { color: #8a9099; padding: 26px; text-align: center; }
   .err { color: #c0392b; font-size: 11.5px; }
   .hint { font-size: 11.5px; color: #8a9099; margin-top: 10px; }
@@ -53,8 +57,8 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>批量提取公众号招聘信息</h1>
-  <div class="sub">每行一个链接，支持 <code>https://mp.weixin.qq.com/s/xxxx</code> 形式的文章地址。结果可导出 CSV / Markdown / JSON。</div>
+  <h1>批量提取公众号推文关键信息</h1>
+  <div class="sub">每行一个链接，支持 <code>https://mp.weixin.qq.com/s/xxxx</code> 形式的文章地址。自动区分招聘帖与文献帖，结果可导出 CSV / Markdown / JSON。</div>
 
   <div class="card">
     <textarea id="urls" placeholder="https://mp.weixin.qq.com/s/L0z32NQpl2pgkzJB45Rq0Q

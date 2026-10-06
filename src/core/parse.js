@@ -433,6 +433,15 @@
     if (typeof source.querySelector === 'function') return parseDocument(source, options.baseUrl);
     if (source.document) return parseDocument(source.document, options.baseUrl);
     if (source.html) return parseSource(source.html, options);
+    // 已经是本模块产出的「原始素材」结构（编程接口/测试里手写的输入）→ 直接透传，
+    // 否则会被当成空 HTML 静默丢掉，是很难排查的坑。
+    if (typeof source.contentText === 'string' && Array.isArray(source.anchors)) {
+      return Object.assign({
+        origin: 'raw', baseUrl: options.baseUrl || '', title: '', account: '', author: '',
+        publishTime: '', description: '', contentHtml: '', images: [], readOriginal: null,
+        bareUrls: [], scriptVars: {}, canonicalUrl: null, structuredData: null, warnings: []
+      }, source);
+    }
     return parseHtml('', options.baseUrl);
   }
 

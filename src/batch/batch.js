@@ -107,9 +107,14 @@
     return new Promise(function (resolve) {
       chrome.tabs.sendMessage(tabId, { type: 'WJE_EXTRACT' }, function (resp) {
         if (!chrome.runtime.lastError && resp && resp.ok) return resolve(resp.result);
-        // 内容脚本没注入 → 手动注入再试
-        var files = ['src/core/rules.js', 'src/core/parse.js', 'src/core/fields.js',
-          'src/core/format.js', 'src/core/extract.js', 'src/content/panel.js', 'src/content/content.js'];
+        // 内容脚本没注入 → 手动注入再试（顺序须与 manifest 一致）
+        var files = [
+          'src/core/rules.js', 'src/core/classify.js',
+          'src/core/profiles/literature.js', 'src/core/parse.js', 'src/core/links.js', 'src/core/insights.js',
+          'src/core/profiles/recruit.js', 'src/core/profiles/general.js',
+          'src/core/fields.js', 'src/core/format.js', 'src/core/extract.js',
+          'src/content/panel.js', 'src/content/content.js'
+        ];
         chrome.scripting.executeScript({ target: { tabId: tabId }, files: files }, function () {
           if (chrome.runtime.lastError) return resolve(null);
           chrome.tabs.sendMessage(tabId, { type: 'WJE_EXTRACT' }, function (resp2) {
@@ -215,21 +220,38 @@
       return;
     }
     var rows = jobs.map(function (j, i) {
+      var det = cell(j, function (r) { return r.detection ? r.detection.activeProfile : ''; });
+      var detLabel = cell(j, function (r) { return r.detection ? r.detection.label : ''; });
       var org = cell(j, function (r) { return r.fields.org ? r.fields.org.value : ''; });
+      var paper = cell(j, function (r) {
+        var p = r.fields.paper;
+        return p ? (p.title || p.doi || '') : '';
+      });
+      var paperMeta = cell(j, function (r) {
+        var p = r.fields.paper;
+        if (!p) return '';
+        return [p.journal, p.year, p.doi].filter(Boolean).join(' · ');
+      });
       var batch = cell(j, function (r) { return r.fields.batch ? r.fields.batch.value : ''; });
       var deadline = cell(j, function (r) { return r.fields.deadline ? r.fields.deadline.value : ''; });
       var best = j.status === 'ok' && j.result.links.best ? j.result.links.best : null;
-      var applies = j.status === 'ok' ? j.result.links.apply.slice(0, 2) : [];
+      var applies = j.status === 'ok' ? (j.result.links.primary || j.result.links.apply || []).slice(0, 2) : [];
       var links = applies.map(function (l) {
         return '<a href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer">' + esc(l.url) + '</a>';
       }).join('<br>');
       if (!links && best) links = '<a href="' + esc(best.url) + '" target="_blank" rel="noopener noreferrer">' + esc(best.url) + '</a>';
 
+      // 主列：招聘帖显示单位，文献帖显示论文标题
+      var isLit = det === 'literature' || (det === 'hybrid' && paper);
+      var mainCell = isLit
+        ? '<b>' + esc(paper) + '</b>' + (paperMeta ? '<br><span style="color:#8a9099">' + esc(paperMeta) + '</span>' : '')
+        : '<b>' + esc(org) + '</b>' + (batch ? '<br><span style="color:#8a9099">' + esc(batch) + '</span>' : '');
+
       return '<tr class="done">' +
         '<td>' + (i + 1) + '</td>' +
-        '<td>' + statusPill(j) + '</td>' +
-        '<td><b>' + esc(org) + '</b>' + (batch ? '<br><span style="color:#8a9099">' + esc(batch) + '</span>' : '') + '</td>' +
-        '<td>' + esc(deadline) + '</td>' +
+        '<td>' + statusPill(j) + (detLabel ? '<br><span class="pill ' + esc(det) + '">' + esc(detLabel) + '</span>' : '') + '</td>' +
+        '<td>' + mainCell + '</td>' +
+        '<td>' + esc(isLit ? (cell(j, function (r) { return r.fields.paper && r.fields.paper.year ? String(r.fields.paper.year) : ''; })) : deadline) + '</td>' +
         '<td class="u">' + (links || '<span style="color:#8a9099">—</span>') + '</td>' +
         '<td class="u">' + (j.status === 'err'
           ? '<span class="err">' + esc(j.error) + '</span>'
@@ -240,7 +262,7 @@
 
     $('tableBox').innerHTML =
       '<div style="overflow:auto;max-height:620px"><table>' +
-      '<thead><tr><th>#</th><th>状态</th><th>招聘主体</th><th>投递截止</th><th>投递入口</th><th>原文</th></tr></thead>' +
+      '<thead><tr><th>#</th><th>状态 / 类型</th><th>招聘主体 · 论文标题</th><th>截止 · 年份</th><th>关键链接</th><th>原文</th></tr></thead>' +
       '<tbody>' + rows + '</tbody></table></div>';
   }
 

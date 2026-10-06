@@ -64,7 +64,11 @@ check('content_scripts 的每个 js / css 都存在', () => {
 
 check('content_scripts 注入顺序满足依赖（rules → parse → fields → format → extract → panel → content）', () => {
   const js = mf.content_scripts[0].js;
-  const order = ['rules.js', 'parse.js', 'fields.js', 'format.js', 'extract.js', 'panel.js', 'content.js'];
+  const order = [
+    'rules.js', 'classify.js', 'profiles/literature.js', 'parse.js', 'links.js', 'insights.js',
+    'profiles/recruit.js', 'profiles/general.js', 'fields.js', 'format.js',
+    'extract.js', 'panel.js', 'content.js'
+  ];
   let last = -1;
   order.forEach((f) => {
     const i = js.findIndex((p) => p.endsWith(f));

@@ -294,7 +294,7 @@ test('Markdown 含表格、投递入口与免责声明', () => {
   includes(md, '| 招聘主体 | 中信银行 |');
   includes(md, '## 投递入口');
   includes(md, 'https://job.citicbank.com');
-  includes(md, '以官方原文为准');
+  includes(md, '请以原文为准');
 });
 
 test('JSON 可往返解析', () => {
@@ -306,7 +306,8 @@ test('CSV 表头与行数正确', () => {
   const csv = format.toCSV([citic, hxb]);
   const lines = csv.split('\r\n');
   eq(lines.length, 3);
-  includes(lines[0], 'applyLink');
+  includes(lines[0], 'primaryLink');
+  includes(lines[0], 'doi');
   includes(lines[1], '中信银行');
   includes(lines[2], '华夏银行');
 });
@@ -339,6 +340,322 @@ test('恶意/畸形 href 不产生无效链接', () => {
 test('HTML 实体与零宽字符被正确解码', () => {
   const t = parse.htmlToText('<p>中信银行&amp;光大银行&#x3001;招聘&nbsp;公告\u200b</p>');
   includes(t, '中信银行&光大银行、招聘 公告');
+});
+
+test('中文标点不被折成半角（显示保真）', () => {
+  const t = rules.normalize('本文提出了 AlphaFold，一个基于深度学习的模型（2021）。');
+  includes(t, 'AlphaFold，一个');
+  includes(t, '（2021）。');
+});
+
+/* ================================================================== *
+ * 9. 内容类型自动判别
+ * ================================================================== */
+
+group('9. 内容类型自动判别 classify.js');
+
+const classify = require('../src/core/classify.js');
+
+test('四篇招聘夹具全部判为「招聘求职」', () => {
+  ['citic-2027.html', 'hxb-2027.html', 'cebbank-2027-text.html', 'cebbank-2027-image.html'].forEach((f) => {
+    const r = analyze(f);
+    eq(r.detection.type, 'recruit', f + ' 误判为 ' + r.detection.label);
+  });
+});
+
+test('两篇文献夹具全部判为「文献阅读」', () => {
+  ['literature-nature.html', 'literature-cn.html'].forEach((f) => {
+    const r = analyze(f);
+    eq(r.detection.type, 'literature', f + ' 误判为 ' + r.detection.label);
+  });
+});
+
+test('DOI 是强凭据：一句话里含 DOI 就足以判为文献', () => {
+  const d = classify.detect({
+    title: '本周推荐',
+    account: '某公众号',
+    contentText: '推荐一篇文章，DOI：10.1038/s41586-021-03819-2，感兴趣可以看看。'
+  });
+  eq(d.type, 'literature');
+});
+
+test('中性内容判为「通用信息」', () => {
+  const d = classify.detect({
+    title: '关于调整办公时间的通知',
+    account: '行政部',
+    contentText: '各位同事，自下周一起办公时间调整为 9:00-18:00，请大家知悉。'
+  });
+  eq(d.type, 'general');
+});
+
+test('两类信号接近时判为 hybrid 并同时跑两套提取器', () => {
+  const raw = {
+    title: '2027届校园招聘正式启动｜课题组最新Nature论文分享',
+    account: '招聘与科研',
+    contentText: '一、校园招聘：本次招聘岗位包括管培生、客户经理、信息科技岗，网申截止时间2026年11月1日，' +
+      '简历投递至 job@example.com，应届毕业生均可报名，笔试面试安排另行通知，招聘流程详见招聘官网，' +
+      '五险一金，工作地点北京。\n' +
+      '二、文献分享：本期论文 DOI：10.1038/s41586-021-03819-2，发表于 Nature，影响因子 64.8，' +
+      '作者 Jumper, J.，摘要如下：本文提出了一个基于深度学习的结构预测方法。',
+    anchors: [], bareUrls: [], images: [], warnings: []
+  };
+  const d = classify.detect(raw);
+  eq(d.type, 'hybrid', '招聘 ' + d.scores.recruit + ' / 文献 ' + d.scores.literature);
+  const res = WJE.pipeline(raw, { nowYear: NOW_YEAR, useDom: false });
+  assert(res.fields.org, 'hybrid 应同时产出招聘主体');
+  assert(res.fields.paper && res.fields.paper.doi, 'hybrid 应同时产出文献 DOI');
+});
+
+test('手动指定画像可覆盖自动判别，并给出提示', () => {
+  const r = analyze('literature-nature.html', { forceProfile: 'recruit' });
+  eq(r.detection.activeProfile, 'recruit');
+  eq(r.detection.autoLabel, '文献阅读');
+  eq(r.detection.overridden, true);
+  assert(r.warnings.some((w) => w.indexOf('手动指定') !== -1), '应提示已手动覆盖');
+});
+
+/* ================================================================== *
+ * 10. 文献提取单元测试
+ * ================================================================== */
+
+group('10. 文献提取 profiles/literature.js');
+
+const literature = require('../src/core/profiles/literature.js');
+
+test('DOI 提取：多种写法与尾部标点清理', () => {
+  eq(literature.extractIdentifiers('DOI：10.1038/s41586-021-03819-2').doi, '10.1038/s41586-021-03819-2');
+  eq(literature.extractIdentifiers('见 https://doi.org/10.1126/science.abe1234。').doi, '10.1126/science.abe1234');
+  eq(literature.extractIdentifiers('（doi:10.1016/j.cell.2020.02.001）').doi, '10.1016/j.cell.2020.02.001');
+  // 尾部右括号多余时应剪掉
+  eq(literature.normalizeDoi('10.1038/s41586-021-03819-2)'), '10.1038/s41586-021-03819-2');
+  // 括号配平时应保留
+  eq(literature.normalizeDoi('10.1016/S0140-6736(20)30185-5'), '10.1016/S0140-6736(20)30185-5');
+});
+
+test('arXiv / PMID 提取', () => {
+  eq(literature.extractIdentifiers('arXiv:2301.12345v2').arxiv, '2301.12345v2');
+  eq(literature.extractIdentifiers('见 arXiv:2301.12345').arxiv, '2301.12345');
+  eq(literature.extractIdentifiers('PMID: 33731999').pmid, '33731999');
+  eq(literature.extractIdentifiers('没有任何标识符的普通文字').doi, null);
+});
+
+test('作者拆分：英文不能用逗号硬切', () => {
+  const a = literature.extractAuthors('作者：Jumper, J., Evans, R., Pritzel, A.');
+  eq(a.list.length, 3);
+  includes(a.list, 'Jumper, J.');
+  includes(a.list, 'Pritzel, A.');
+});
+
+test('作者拆分：中文顿号 / 逗号', () => {
+  const a = literature.extractAuthors('作者：张三、李四、王五');
+  eq(a.list.length, 3);
+  includes(a.list, '李四');
+});
+
+test('期刊识别：标签优先，其次已知刊名表', () => {
+  eq(literature.extractJournal('期刊：Nature', '').value, 'Nature');
+  eq(literature.extractJournal('本文发表于《经济研究》，很值得一读。', '').value, '经济研究');
+  eq(literature.extractJournal('这篇发在 Science Advances 上', '').value, 'Science Advances');
+});
+
+test('卷期页解析：GB/T / APA / Nature 三种著录格式', () => {
+  let n = literature.extractNumbering('经济研究, 2024, 59(4): 112-129.');
+  eq(n.year, 2024); eq(n.volume, '59'); eq(n.issue, '4'); eq(n.pages, '112-129');
+
+  n = literature.extractNumbering('Nature, 596(7873), 583-589.');
+  eq(n.volume, '596'); eq(n.issue, '7873'); eq(n.pages, '583-589');
+
+  n = literature.extractNumbering('Nature 596, 583–589 (2021)');
+  eq(n.volume, '596'); eq(n.pages, '583–589'); eq(n.year, 2021);
+
+  n = literature.extractNumbering('卷期页：596(7873): 583-589');
+  eq(n.volume, '596'); eq(n.issue, '7873'); eq(n.pages, '583-589');
+});
+
+test('影响因子与分区', () => {
+  const m = literature.extractMetrics('影响因子：64.8（JCR Q1，中科院一区）');
+  eq(m.impactFactor, '64.8');
+  eq(m.jcr, 'Q1');
+  eq(m.cas, '一区');
+});
+
+test('关键词按分隔符切分并去重', () => {
+  const k = literature.extractKeywords('关键词：深度学习；蛋白质结构；AlphaFold；深度学习');
+  includes(k.zh, '深度学习');
+  includes(k.zh, 'AlphaFold');
+  eq(k.zh.filter((x) => x === '深度学习').length, 1, '应去重');
+});
+
+test('摘要截取到下一节为止', () => {
+  const t = '摘要：\n这是摘要正文，长度需要超过三十个字符才被认为是有效摘要内容。\n关键词：甲；乙';
+  const a = literature.extractAbstract(t);
+  assert(a.zh, '应抽到中文摘要');
+  assert(a.zh.indexOf('关键词') === -1, '摘要不应吞掉关键词段');
+});
+
+test('引用格式：英文文献用英文原题，GB/T 不加首字母点号', () => {
+  const c = literature.buildCitations({
+    titleZh: '中译标题', titleEn: 'Highly accurate protein structure prediction with AlphaFold',
+    authors: ['Jumper, J.', 'Evans, R.', 'Pritzel, A.', 'Green, T.'],
+    journal: 'Nature', year: 2021, volume: '596', issue: '7873', pages: '583-589',
+    doi: '10.1038/s41586-021-03819-2'
+  });
+  includes(c.gbt7714, 'Highly accurate protein structure prediction with AlphaFold');
+  assert(c.gbt7714.indexOf('中译标题') === -1, 'GB/T 不应使用中译标题');
+  includes(c.gbt7714, 'Jumper J, Evans R, Pritzel A, et al.');
+  assert(!/\bJumper J\./.test(c.gbt7714), 'GB/T 首字母后不应带点号');
+  includes(c.apa, 'Highly accurate');
+  includes(c.apa, ', & Green, T. (2021).');
+  includes(c.bibtex, '@article{');
+  includes(c.bibtex, 'doi     = {10.1038/s41586-021-03819-2}');
+});
+
+test('引用格式：中文文献用中文题名且不出现 & 以外的英文残留', () => {
+  const c = literature.buildCitations({
+    titleZh: '数字化转型与企业全要素生产率', titleEn: null,
+    authors: ['张三', '李四', '王五'],
+    journal: '经济研究', year: 2024, volume: '59', issue: '4', pages: '112-129'
+  });
+  includes(c.gbt7714, '张三, 李四, 王五. 数字化转型与企业全要素生产率[J]. 经济研究, 2024, 59(4): 112-129.');
+  assert(c.gbt7714.indexOf('等') === -1, '三位作者以内不应出现「等」');
+});
+
+test('开放获取判断', () => {
+  assert(literature.detectOpenAccess(['https://arxiv.org/abs/2301.12345'], 'Nature'), 'arXiv 应判为 OA');
+  assert(literature.detectOpenAccess(['https://www.mdpi.com/x'], 'MDPI'), 'MDPI 应判为 OA');
+  assert(!literature.detectOpenAccess(['https://www.nature.com/articles/x'], 'Nature'), '订阅制不应判为 OA');
+});
+
+test('论文类型识别', () => {
+  eq(literature.extractPaperType('这是一篇综述，总结了近年进展').value, '综述');
+  eq(literature.extractPaperType('本文为 arXiv 预印本').value, '预印本');
+  eq(literature.extractPaperType('博士学位论文').value, '学位论文');
+  eq(literature.extractPaperType('一篇普通的实验研究报告').value, '研究论文');
+});
+
+/* ================================================================== *
+ * 11. 文献夹具回归
+ * ================================================================== */
+
+group('11. 夹具回归：Nature / AlphaFold（英文文献）');
+
+const litNat = analyze('literature-nature.html');
+
+test('类型与标题', () => {
+  eq(litNat.detection.type, 'literature');
+  eq(litNat.detection.confidence, 'high');
+  eq(litNat.fields.paper.titleEn, 'Highly accurate protein structure prediction with AlphaFold');
+  includes(litNat.fields.paper.titleZh, 'AlphaFold');
+});
+
+test('作者 / 第一作者 / 通讯作者', () => {
+  eq(litNat.fields.paper.authors.length, 6);
+  includes(litNat.fields.paper.authors, 'Jumper, J.');
+  includes(litNat.fields.paper.firstAuthor, 'Jumper, J.');
+  includes(litNat.fields.paper.correspondingAuthor, 'Jumper, J.');
+});
+
+test('期刊 / 年份 / 卷期页 / DOI', () => {
+  eq(litNat.fields.paper.journal, 'Nature');
+  eq(litNat.fields.paper.year, 2021);
+  eq(litNat.fields.paper.volume, '596');
+  eq(litNat.fields.paper.issue, '7873');
+  eq(litNat.fields.paper.pages, '583-589');
+  eq(litNat.fields.paper.doi, '10.1038/s41586-021-03819-2');
+});
+
+test('影响因子 / 分区 / 关键词 / 摘要', () => {
+  eq(litNat.fields.paper.impactFactor, '64.8');
+  eq(litNat.fields.paper.jcr, 'Q1');
+  eq(litNat.fields.paper.cas, '一区');
+  includes(litNat.fields.paper.keywordsZh, '深度学习');
+  assert(litNat.fields.paper.abstractZh && litNat.fields.paper.abstractZh.length > 50, '应有中文摘要');
+  assert(litNat.fields.paper.abstractEn && litNat.fields.paper.abstractEn.length > 50, '应有英文摘要');
+});
+
+test('原文链接优先取 DOI 解析页，其次出版社页', () => {
+  eq(litNat.links.best.host, 'doi.org');
+  eq(litNat.links.best.kind, 'doi');
+  const hosts = litNat.links.primary.map((l) => l.host);
+  includes(hosts, 'www.nature.com');
+});
+
+test('阅读原文 = doi.org 跳转', () => {
+  eq(litNat.links.readOriginal.url, 'https://doi.org/10.1038/s41586-021-03819-2');
+});
+
+test('Markdown 输出含原文链接与引用格式', () => {
+  const md = format.toMarkdown(litNat);
+  includes(md, '## 原文链接');
+  includes(md, '## 引用格式');
+  includes(md, 'GB/T 7714');
+  includes(md, 'doi.org/10.1038/s41586-021-03819-2');
+  includes(md, '| DOI | 10.1038/s41586-021-03819-2 |');
+});
+
+test('toCitation / toPaperCard 一键复制', () => {
+  includes(format.toCitation(litNat, 'gbt7714'), 'Highly accurate protein structure prediction with AlphaFold');
+  includes(format.toCitation(litNat, 'apa'), 'https://doi.org/10.1038/s41586-021-03819-2');
+  includes(format.toCitation(litNat, 'bibtex'), '@article{');
+  includes(format.toPaperCard(litNat), '标题：Highly accurate');
+  includes(format.toPaperCard(litNat), '原文链接：https://doi.org/');
+});
+
+group('12. 夹具回归：中文期刊（知网，无 DOI）');
+
+const litCn = analyze('literature-cn.html');
+
+test('类型 / 标题 / 作者', () => {
+  eq(litCn.detection.type, 'literature');
+  includes(litCn.fields.paper.titleZh, '数字化转型与企业全要素生产率');
+  eq(litCn.fields.paper.authors.length, 3);
+  includes(litCn.fields.paper.authors, '王五');
+});
+
+test('期刊 / 卷期页 / 分区', () => {
+  eq(litCn.fields.paper.journal, '经济研究');
+  eq(litCn.fields.paper.year, 2024);
+  eq(litCn.fields.paper.volume, '59');
+  eq(litCn.fields.paper.issue, '4');
+  eq(litCn.fields.paper.pages, '112-129');
+  eq(litCn.fields.paper.cas, '一区');
+  eq(litCn.fields.paper.doi, null);
+});
+
+test('原文链接落在知网，并识别为文献数据库', () => {
+  eq(litCn.links.best.kind, 'database');
+  includes(litCn.links.best.url, 'kns.cnki.net');
+});
+
+test('无 DOI 时给出提示', () => {
+  assert(litCn.warnings.some((w) => w.indexOf('DOI') !== -1), '应提示缺少 DOI');
+});
+
+test('CSV 导出包含文献列且内容正确', () => {
+  const csv = format.toCSV([litNat, litCn]);
+  const lines = csv.split('\r\n');
+  eq(lines.length, 3);
+  includes(lines[0], 'paperTitle');
+  includes(lines[0], 'doi');
+  includes(lines[1], '10.1038/s41586-021-03819-2');
+  includes(lines[2], '经济研究');
+});
+
+test('文献画像下招聘域名不再抢占主链接', () => {
+  const raw = {
+    title: '文献分享：某研究',
+    account: '科研速递',
+    contentText: '本期论文 DOI：10.1038/s41586-021-03819-2，发表于 Nature。另附某公司校园招聘网申链接。',
+    anchors: [
+      { href: 'https://job.example.com/campus', text: '网申入口', near: '' },
+      { href: 'https://doi.org/10.1038/s41586-021-03819-2', text: '原文', near: '' }
+    ],
+    bareUrls: [], images: [], warnings: []
+  };
+  const lit = WJE.pipeline(raw, { nowYear: NOW_YEAR, useDom: false, forceProfile: 'literature' });
+  eq(lit.links.best.host, 'doi.org', '文献画像下 DOI 应排第一');
+  const job = lit.links.all.filter((l) => l.host === 'job.example.com')[0];
+  assert(job && job.reasons.some((r) => r.indexOf('招聘类域名') !== -1), '招聘域名应被降权并说明原因');
 });
 
 /* ================================================================== */

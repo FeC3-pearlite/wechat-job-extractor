@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         微信求职信息提取器
+// @name         微信推文关键信息提取器
 // @namespace    https://github.com/FeC3-pearlite/wechat-job-extractor
-// @version      1.0.0
-// @description  从微信公众号招聘推文里一键提取招聘单位、届别、岗位、投递截止时间与官方投递链接，可复制/下载 Markdown、JSON。
+// @version      2.0.0
+// @description  自动判别公众号推文类型：招聘帖提取投递入口与截止时间，文献帖提取原文链接、作者、期刊、DOI 与引用格式，可导出 Markdown/JSON。
 // @author       FeC3-pearlite
 // @match        https://mp.weixin.qq.com/s*
 // @icon         data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2307c160'/%3E%3C/svg%3E
@@ -40,8 +40,12 @@
     'ａ': 'a', 'ｂ': 'b', 'ｃ': 'c', 'ｄ': 'd', 'ｅ': 'e', 'ｆ': 'f', 'ｇ': 'g', 'ｈ': 'h', 'ｉ': 'i', 'ｊ': 'j',
     'ｋ': 'k', 'ｌ': 'l', 'ｍ': 'm', 'ｎ': 'n', 'ｏ': 'o', 'ｐ': 'p', 'ｑ': 'q', 'ｒ': 'r', 'ｓ': 's', 'ｔ': 't',
     'ｕ': 'u', 'ｖ': 'v', 'ｗ': 'w', 'ｘ': 'x', 'ｙ': 'y', 'ｚ': 'z',
-    '：': ':', '；': ';', '，': ',', '（': '(', '）': ')', '％': '%', '＃': '#', '＆': '&', '／': '/', '－': '-',
-    '　': ' ', '～': '~', '！': '!', '？': '?', '＠': '@', '．': '.', '、': '、'
+    '％': '%', '＃': '#', '＆': '&', '／': '/', '－': '-', '＠': '@', '．': '.',
+    '　': ' ',
+    // 注意：中文标点（，。；：！？（）「」《》）**不转换**。
+    // 折叠它们会让「本文提出了 AlphaFold，一个…」在面板里显示成半角逗号，中文可读性变差；
+    // 而所有正则本来就用 [:：] / [,，] 这类双写容错写法，并不依赖折叠。
+    '、': '、'
   };
 
   /** 全角转半角 + 统一空白。可逆性无关，供正则匹配使用。 */
@@ -729,6 +733,931 @@
   };
 });
 
+/* ==================== src/core/classify.js ==================== */
+/*!
+ * 微信求职信息提取器 — 内容类型判别 (classify.js)
+ *
+ * 公众号推送类型很杂：招聘启事、文献分享、政策解读、活动通知……
+ * 这里用加权关键词给「招聘」与「文献」两类打分，自动决定该跑哪套提取器。
+ *
+ * 设计要点：
+ *  - 标题权重 3、公众号名权重 2、正文权重 1；强特征词权重远高于弱特征词
+ *  - DOI / arXiv / PMID 这类"硬凭据"直接给高分，不依赖措辞
+ *  - 两类分数接近时判为 hybrid，两套提取器都跑，结果合并
+ */
+(function (root, factory) {
+  var api = factory(
+    (typeof module !== 'undefined' && module.exports) ? require('./rules.js') : (root && root.WJE && root.WJE.rules)
+  );
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  if (root) { root.WJE = root.WJE || {}; root.WJE.classify = api; }
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (rules) {
+  'use strict';
+
+  var TYPE_RECRUIT = 'recruit';
+  var TYPE_LITERATURE = 'literature';
+  var TYPE_GENERAL = 'general';
+  var TYPE_HYBRID = 'hybrid';
+
+  /* --------------------------- 关键词表 --------------------------- */
+
+  var RECRUIT_STRONG = [
+    '校园招聘', '社会招聘', '秋季招聘', '春季招聘', '校招', '秋招', '春招', '网申', '简历投递', '投递简历',
+    '应届毕业生', '应届生', '招聘岗位', '招聘公告', '招聘启事', '招聘简章', '投递截止', '报名截止', '招聘对象',
+    '管理培训生', '管培生', '实习生招聘', '暑期实习', '笔试', '面试', '录用', 'offer', '应聘', '招聘流程',
+    '薪酬福利', '五险一金', '工作地点', '学历要求', '专业要求', '网申通道', '简历筛选', '招聘官网'
+  ];
+  var RECRUIT_WEAK = [
+    '招聘', '岗位', '职位', '简历', '待遇', '薪酬', '年薪', '月薪', '入职', '试用期', '编制', '双休',
+    '单位简介', '应聘者', '求职', '宣讲会', '双选会', '人才引进', '定向选调', '选调生', '事业编'
+  ];
+
+  var LITERATURE_STRONG = [
+    '文献', '论文', 'DOI', 'doi', '期刊', '摘要', '影响因子', '参考文献', '通讯作者', '第一作者',
+    '共同一作', '综述', '预印本', 'arXiv', 'arxiv', 'PubMed', 'PMID', '引用格式', '文献分享',
+    '论文标题', '论文导读', '文献导读', '科研', '学术论文', '研究成果', '课题组', '投稿', '审稿',
+    '分区', 'Q1', 'Q2', '中科院', 'JCR', '卷期', 'pp.', 'et al', 'Accepted', 'Published'
+  ];
+  var LITERATURE_WEAK = [
+    '研究', '作者', '发表', '教授', '博士', '院士', '实验', '方法', '结论', '数据', '模型', '机制',
+    '分析', '综述', '团队', '机构', '大学', '学院', '实验室', '样本', '显著', '假设', '验证',
+    '大学', '研究所', '学会', '会议', '报告'
+  ];
+
+  // 硬凭据：出现即强烈指向文献
+  var HARD_PATTERNS = [
+    { re: /\b10\.\d{4,9}\/[-._;()\/:a-zA-Z0-9<>]+/, weight: 60, label: 'DOI' },
+    { re: /arXiv[:\s]*\d{4}\.\d{4,5}/i, weight: 55, label: 'arXiv 编号' },
+    { re: /\bPMID[:\s]*\d{7,8}/i, weight: 50, label: 'PubMed ID' },
+    { re: /(?:Nature|Science|Cell|Lancet|NEJM|JAMA|BMJ|PNAS)\s*[|｜,，]?\s*\d{4}/, weight: 35, label: '顶刊名+年份' },
+    { re: /影响因子\s*[:：]?\s*[\d.]+/, weight: 40, label: '影响因子' },
+    { re: /(?:中科院|JCR)\s*(?:大类)?\s*(?:一区|二区|三区|四区|Q[1-4])/i, weight: 40, label: '期刊分区' }
+  ];
+
+  var KNOWN_PUBLISHER_RE = /(?:nature\.com|science\.org|sciencedirect|springer|wiley|ieeexplore|acs\.org|rsc\.org|tandfonline|sagepub|frontiersin|mdpi\.com|plos\.org|cell\.com|nejm\.org|thelancet|bmj\.com|jamanetwork|pnas\.org|arxiv\.org|biorxiv|medrxiv|ssrn\.com|cnki\.net|wanfangdata|cqvip|x-mol\.com|doi\.org|pubmed)/i;
+
+  /* --------------------------- 打分 --------------------------- */
+
+  function countHits(text, list, weight) {
+    if (!text) return { score: 0, hits: [] };
+    var score = 0, hits = [];
+    for (var i = 0; i < list.length; i++) {
+      var kw = list[i];
+      var idx = text.indexOf(kw);
+      if (idx === -1) continue;
+      // 命中一次得基础分，重复出现有递减加成（最多 +3 次）
+      var n = 0, from = 0, p;
+      while ((p = text.indexOf(kw, from)) !== -1 && n < 4) { n++; from = p + kw.length; }
+      score += weight * (1 + Math.min(n - 1, 3) * 0.35);
+      if (hits.length < 12) hits.push(kw);
+    }
+    return { score: score, hits: hits };
+  }
+
+  function scoreSignals(title, account, body, list, wTitle, wAccount, wBody) {
+    var t = countHits(title, list, wTitle);
+    var a = countHits(account, list, wAccount);
+    var b = countHits(body, list, wBody);
+    // 正文命中词种很多时给一个封顶的多样性奖励（避免长文靠堆词取胜）
+    var diversity = Math.min(b.hits.length, 10) * wBody * 0.5;
+    return {
+      score: t.score + a.score + b.score + diversity,
+      hits: rules.uniq(t.hits.concat(a.hits).concat(b.hits)),
+      inTitle: t.hits
+    };
+  }
+
+  /**
+   * 判别推送类型。
+   * @param {{title:string, account:string, contentText:string}} raw
+   * @returns {{type:string, confidence:string, scores:object, evidence:Array, hints:Array}}
+   */
+  function detect(raw) {
+    raw = raw || {};
+    var title = rules.normalize(raw.title || '');
+    var account = rules.normalize(raw.account || '');
+    var bodyAll = raw.contentText || '';
+    var bodyHead = bodyAll.slice(0, 2000);
+    var body = bodyHead + '\n' + bodyAll.slice(-600);   // 头部+尾部，尾部常有"参考文献/引用格式"
+
+    var R_S = scoreSignals(title, account, body, RECRUIT_STRONG, 6, 5, 1.2);
+    var R_W = scoreSignals(title, account, bodyHead, RECRUIT_WEAK, 2.4, 2, 0.45);
+    var L_S = scoreSignals(title, account, body, LITERATURE_STRONG, 6, 5, 1.2);
+    var L_W = scoreSignals(title, account, bodyHead, LITERATURE_WEAK, 1.6, 1.4, 0.35);
+
+    // 把「关键词/结构信号」与「硬凭据」分开记：
+    // 硬凭据（DOI、影响因子…）动辄 +40~+60，会淹没关键词层面的平衡，
+    // 所以 hybrid 判定只看基础分，总分只用于决定最终归属。
+    var recruitBase = R_S.score + R_W.score;
+    var literatureBase = L_S.score + L_W.score;
+    var literatureHard = 0;
+    var evidence = [];
+
+    var hay = title + '\n' + body;
+    HARD_PATTERNS.forEach(function (hp) {
+      if (hp.re.test(hay)) {
+        literatureHard += hp.weight;
+        evidence.push('命中硬凭据：' + hp.label + '（+ ' + hp.weight + '）');
+      }
+    });
+
+    // 链接里的学术域名 / 招聘域名（结构性证据，计入基础分）
+    var links = (raw.anchors || []).concat((raw.bareUrls || []).map(function (b) { return { href: b.url }; }));
+    var paperLinks = 0, jobLinks = 0;
+    links.forEach(function (a) {
+      if (!a.href) return;
+      var u = rules.unwrapUrl(rules.normalize(a.href));
+      if (KNOWN_PUBLISHER_RE.test(u)) paperLinks++;
+      if (/job|zhaopin|recruit|campus|career|wecruit|hotjob|51job/i.test(u)) jobLinks++;
+    });
+    if (paperLinks) {
+      literatureBase += Math.min(paperLinks, 5) * 12;
+      evidence.push('正文含 ' + paperLinks + ' 条学术出版域名链接（+ ' + Math.min(paperLinks, 5) * 12 + '）');
+    }
+    if (jobLinks) {
+      recruitBase += Math.min(jobLinks, 5) * 12;
+      evidence.push('正文含 ' + jobLinks + ' 条招聘系统链接（+ ' + Math.min(jobLinks, 5) * 12 + '）');
+    }
+
+    // 「阅读原文」指向学术域名 → 强文献信号（但仍属结构证据，计基础分）
+    if (raw.readOriginal && raw.readOriginal.url && KNOWN_PUBLISHER_RE.test(raw.readOriginal.url)) {
+      literatureBase += 40;
+      evidence.push('「阅读原文」指向学术出版站点（+ 40）');
+    }
+
+    // 结构化著录格式（年, 卷(期): 页码）
+    if (/\b\d{4}\s*[,，]\s*\d{1,3}\s*\(\d{1,3}\)\s*[:：]\s*\d+/.test(body)) {
+      literatureBase += 20;
+      evidence.push('出现「年, 卷(期): 页码」著录格式（+ 20）');
+    }
+
+    var recruit = {
+      base: round1(recruitBase),
+      hard: 0,
+      total: round1(recruitBase),
+      hits: rules.uniq(R_S.hits.concat(R_W.hits)),
+      strong: R_S.hits
+    };
+    var literature = {
+      base: round1(literatureBase),
+      hard: round1(literatureHard),
+      total: round1(literatureBase + literatureHard),
+      hits: rules.uniq(L_S.hits.concat(L_W.hits)),
+      strong: L_S.hits
+    };
+
+    var FLOOR = 6;           // 总分低于此 → 通用
+    var HYBRID_FLOOR = 10;   // 两类基础分都要达到这个量级
+    var HYBRID_RATIO = 0.35; // 且弱的一方不低于强方的 35%
+
+    var maxTotal = Math.max(recruit.total, literature.total);
+    var minBase = Math.min(recruit.base, literature.base);
+    var maxBase = Math.max(recruit.base, literature.base);
+    var type, confidence;
+
+    if (maxTotal < FLOOR) {
+      type = TYPE_GENERAL;
+      confidence = 'low';
+    } else if (minBase >= HYBRID_FLOOR && maxBase > 0 && minBase / maxBase >= HYBRID_RATIO) {
+      type = TYPE_HYBRID;
+      confidence = 'medium';
+    } else if (recruit.total >= literature.total) {
+      type = TYPE_RECRUIT;
+      confidence = recruit.total >= 25 ? 'high' : 'medium';
+    } else {
+      type = TYPE_LITERATURE;
+      confidence = literature.total >= 25 ? 'high' : 'medium';
+    }
+
+    var scoreText = '招聘 ' + recruit.total + '（基础 ' + recruit.base + '） / 文献 ' +
+      literature.total + '（基础 ' + literature.base + ' + 硬凭据 ' + literature.hard + '）';
+    if (type === TYPE_HYBRID) evidence.unshift('两类信号都较强（' + scoreText + '），两套提取器并行');
+    else if (type === TYPE_GENERAL) evidence.unshift('两类信号都很弱（' + scoreText + '），按通用模式处理');
+    else evidence.unshift(scoreText + ' → ' + label(type));
+
+    return {
+      type: type,
+      confidence: confidence,
+      scores: {
+        recruit: recruit.total, literature: literature.total,
+        recruitBase: recruit.base, literatureBase: literature.base, literatureHard: literature.hard
+      },
+      evidence: evidence,
+      hints: {
+        recruit: recruit.hits.slice(0, 12),
+        literature: literature.hits.slice(0, 12)
+      },
+      labels: {
+        recruit: '招聘求职',
+        literature: '文献阅读',
+        general: '通用信息',
+        hybrid: '招聘 + 文献'
+      }
+    };
+  }
+
+  function round1(n) { return Math.round(n * 10) / 10; }
+
+  function label(type) {
+    return {
+      recruit: '招聘求职',
+      literature: '文献阅读',
+      general: '通用信息',
+      hybrid: '招聘 + 文献'
+    }[type] || type;
+  }
+
+  return {
+    detect: detect,
+    label: label,
+    TYPE_RECRUIT: TYPE_RECRUIT,
+    TYPE_LITERATURE: TYPE_LITERATURE,
+    TYPE_GENERAL: TYPE_GENERAL,
+    TYPE_HYBRID: TYPE_HYBRID,
+    RECRUIT_STRONG: RECRUIT_STRONG,
+    RECRUIT_WEAK: RECRUIT_WEAK,
+    LITERATURE_STRONG: LITERATURE_STRONG,
+    LITERATURE_WEAK: LITERATURE_WEAK,
+    KNOWN_PUBLISHER_RE: KNOWN_PUBLISHER_RE
+  };
+});
+
+/* ==================== src/core/profiles/literature.js ==================== */
+/*!
+ * 微信求职信息提取器 — 文献阅读画像 (profiles/literature.js)
+ *
+ * 面向「文献分享 / 论文推送 / 学术科普」类公众号推文，提取：
+ *   标题（中/英）、作者（含第一/通讯作者）、期刊、年份卷期页、
+ *   DOI / arXiv / PMID、影响因子与分区、摘要、关键词、引用格式。
+ *
+ * 公众号文献推送的排版高度口语化（emoji 前缀、中英混排、一行一个字段），
+ * 因此这里走「标签优先 + 结构模式兜底 + 硬凭据」三层策略。
+ */
+(function (root, factory) {
+  var api = factory(
+    (typeof module !== 'undefined' && module.exports)
+      ? { rules: require('../rules.js') }
+      : { rules: root && root.WJE && root.WJE.rules }
+  );
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  if (root) {
+    root.WJE = root.WJE || {};
+    root.WJE.profiles = root.WJE.profiles || {};
+    root.WJE.profiles.literature = api;
+  }
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (deps) {
+  'use strict';
+
+  var rules = deps.rules;
+
+  /* ================================================================== *
+   * 硬标识符
+   * ================================================================== */
+
+  var DOI_RE = /(?:doi\s*[:：]?\s*|doi\.org\/|dx\.doi\.org\/)?(10\.\d{4,9}\/[-._;()\/:a-zA-Z0-9<>]+)/gi;
+  var ARXIV_NEW_RE = /arXiv\s*[:：]?\s*(\d{4}\.\d{4,5})(v\d+)?/i;
+  var ARXIV_OLD_RE = /arXiv\s*[:：]?\s*([a-z\-]+(?:\.[A-Z]{2})?\/\d{7})(v\d+)?/;
+  var PMID_RE = /\bPMID\s*[:：]?\s*(\d{7,8})/i;
+  var ISBN_RE = /\bISBN[\s:：]*((?:97[89][-\s]?)?[\d][\d\-\s]{8,16}[\dXx])/i;
+
+  /** 去掉 DOI 末尾被正则吞进来的标点。 */
+  function cleanDoi(s) {
+    var t = String(s || '').trim();
+    t = t.replace(/[.,;:、。，；]+$/, '');
+    // 括号配平：多出来的右括号要剪掉
+    var opens = (t.match(/\(/g) || []).length;
+    var closes = (t.match(/\)/g) || []).length;
+    while (closes > opens && t.charAt(t.length - 1) === ')') {
+      t = t.slice(0, -1);
+      closes--;
+    }
+    t = t.replace(/[.,;:、。，；]+$/, '');
+    return t;
+  }
+
+  /** 归一化 DOI：小写、去前缀、去尾部标点。 */
+  function normalizeDoi(raw) {
+    if (!raw) return null;
+    var t = cleanDoi(raw).replace(/^(?:https?:\/\/)?(?:dx\.)?doi\.org\//i, '').replace(/^doi\s*[:：]\s*/i, '');
+    return /^10\.\d{4,9}\//.test(t) ? t : null;
+  }
+
+  function extractDois(text) {
+    if (!text) return [];
+    var out = [];
+    DOI_RE.lastIndex = 0;
+    var m;
+    while ((m = DOI_RE.exec(text)) !== null) {
+      var d = normalizeDoi(m[1]);
+      if (d && out.indexOf(d) === -1) out.push(d);
+    }
+    return out;
+  }
+
+  function extractIdentifiers(text) {
+    if (!text) return {};
+    var doiList = extractDois(text);
+    var m;
+    return {
+      doi: doiList[0] || null,
+      dois: doiList,
+      arxiv: (m = text.match(ARXIV_NEW_RE)) ? m[1] + (m[2] || '') : ((m = text.match(ARXIV_OLD_RE)) ? m[1] + (m[2] || '') : null),
+      pmid: (m = text.match(PMID_RE)) ? m[1] : null,
+      isbn: (m = text.match(ISBN_RE)) ? m[1].trim() : null
+    };
+  }
+
+  /* ================================================================== *
+   * 分段工具
+   * ================================================================== */
+
+  /** 从文本中按标签取值，取到行尾或下一个明显分隔为止。 */
+  function labeledValue(text, labels, maxLen) {
+    if (!text) return null;
+    maxLen = maxLen || 300;
+    for (var i = 0; i < labels.length; i++) {
+      var re = new RegExp('(?:^|[\\n\\r。；;，,]|\\s)' + labels[i] + '\\s*[:：]?\\s*([^\\n\\r]{2,' + maxLen + '})', 'i');
+      var m = text.match(re);
+      if (m) {
+        var v = m[1].replace(/^[\s:：\-—·、]+/, '').replace(/\s+$/, '').trim();
+        // 去掉行内 emoji 前缀残留
+        v = v.replace(/^[\u2600-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF\u2B00-\u2BFF]+\s*/g, '').trim();
+        if (v.length >= 2) return v;
+      }
+    }
+    return null;
+  }
+
+  /** 截取一个段落：从 startRe 之后开始，遇到 stopRe 之一或超长为止。 */
+  function sliceSection(text, startRe, stopRe, maxLen) {
+    if (!text) return null;
+    var m = text.match(startRe);
+    if (!m) return null;
+    var rest = text.slice(m.index + m[0].length);
+    var end = rest.length;
+    if (stopRe) {
+      var s = rest.match(stopRe);
+      if (s && s.index > 0) end = s.index;
+    }
+    var seg = rest.slice(0, Math.min(end, maxLen)).trim();
+    seg = seg.replace(/^[\s:：\-—]+/, '').trim();
+    return seg.length >= 30 ? seg : null;
+  }
+
+  // 注意：这里**不能**用 \b 收尾。JS 的 \b 基于 ASCII \w，中文「关键词」与「：」之间
+  // 不存在词边界，\b 会让整条 stop 规则失效（摘要就会一路吞到关键词段里）。
+  // 改用「后面不是拉丁字母/数字」来兼顾英文单词边界。
+  var SECTION_STOP = /\n\s*(?:关\s*键\s*词|关键字|References?|参考文献|引用格式|原文链接|原文地址|DOI|作者简介|通讯作者|第一作者|Citation|How to cite|图\s*\d|表\s*\d|Abstract|摘\s*要)(?![A-Za-z0-9])/i;
+
+  /* ================================================================== *
+   * 标题
+   * ================================================================== */
+
+  var TITLE_LABELS_ZH = ['原文标题', '论文题目', '文献题目', '论文标题', '文献标题', '文章标题', '论文名称', '文献名称', '中文标题', '题目', '标题'];
+  var TITLE_LABELS_EN = ['Original\\s*Title', 'Article\\s*Title', 'Paper\\s*Title', 'Title'];
+
+  var TITLE_NOISE = /(公众号|微信|点击|关注|扫码|二维码|阅读原文|转载|版权|来源[:：]|编辑[:：]|https?:\/\/|www\.|@)/;
+
+  function looksLikeTitle(s) {
+    if (!s) return false;
+    var t = s.trim();
+    if (t.length < 6 || t.length > 260) return false;
+    if (TITLE_NOISE.test(t)) return false;
+    if (/^[\d\s.、)）]+$/.test(t)) return false;
+    return true;
+  }
+
+  /** 中文标题：优先标签 / 《》，否则用推文标题去掉前缀标签与副标题。 */
+  function extractTitleZh(raw, text) {
+    var v = labeledValue(text, TITLE_LABELS_ZH, 200);
+    if (looksLikeTitle(v) && /[\u4e00-\u9fa5]/.test(v)) return { value: v.trim(), from: 'label' };
+
+    var m = text.match(/《([^》\n]{4,120})》/);
+    if (m && /[\u4e00-\u9fa5]/.test(m[1])) return { value: m[1].trim(), from: 'bookmark' };
+
+    // 推文标题：去掉【…】/「…」前缀与 ｜ 后的栏目前缀
+    var t = rules.normalize(raw.title || '');
+    t = t.replace(/^[【\[［(（][^】\]］)）]{1,24}[】\]］)）]\s*/, '');
+    t = t.replace(/^(?:文献分享|论文推送|好文推荐|学术前沿|科研动态|一周文献|导读)\s*[|｜:：\-—]?\s*/, '');
+    var parts = t.split(/[|｜]/);
+    if (parts.length > 1) {
+      // 取更长的一段作为标题主体
+      parts.sort(function (a, b) { return b.length - a.length; });
+      t = parts[0];
+    }
+    t = t.replace(/[（(]\s*(?:文献|论文)?(?:分享|推荐|导读)\s*[)）]/g, '').trim();
+    if (looksLikeTitle(t) && /[\u4e00-\u9fa5]/.test(t)) return { value: t, from: 'article_title' };
+    return null;
+  }
+
+  /** 英文标题：标签优先，其次找「一行里 ≥4 个拉丁词」的行。 */
+  var TITLE_LABEL_STRIP = /^(?:原文标题|论文标题|文献标题|文章标题|论文题目|文献题目|中文标题|标题|题目|Original\s*Title|Article\s*Title|Paper\s*Title|Title)\s*[:：]\s*/i;
+  // 这些标签开头的行是「字段行」，不可能是标题
+  var NON_TITLE_LABEL = /^\s*(?:作者团队|作者列表|全部作者|文章作者|论文作者|作者|单位|机构|通讯作者|通信作者|第一作者|期刊|杂志|发表期刊|期刊名称|刊物|DOI|doi|PMID|arXiv|原文链接|原文地址|文章链接|链接|网址|URL|时间|日期|发表时间|发表日期|卷期|卷期页|页码|影响因子|分区|关键词|关键字|摘要|引用|引用格式|参考文献|邮箱|Email|电话|收稿)\s*[:：]/;
+
+  function extractTitleEn(text) {
+    var v = labeledValue(text, TITLE_LABELS_EN, 260);
+    if (v && looksLikeTitle(v) && countLatinWords(v) >= 3) return { value: v.trim(), from: 'label' };
+
+    var lines = String(text || '').split(/\n+/);
+    var best = null;
+    for (var i = 0; i < Math.min(lines.length, 60); i++) {
+      var rawLine = lines[i].trim().replace(/^[\u2600-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF\u2B00-\u2BFF\s]+/, '');
+      var fromLabel = TITLE_LABEL_STRIP.test(rawLine);
+      var ln = rawLine.replace(TITLE_LABEL_STRIP, '');
+      if (NON_TITLE_LABEL.test(ln)) continue;
+      var words = countLatinWords(ln);
+      if (words < 4 || ln.length < 20 || ln.length > 260) continue;
+      if (TITLE_NOISE.test(ln)) continue;
+      if (/^[A-Z0-9 .,&'\-:;()]+$/.test(ln) && words < 5) continue;   // 全大写短句多半是标签
+      var score = words * 2 + Math.min(ln.length, 120) / 20;
+      if (/[:：?？]/.test(ln)) score += 3;                              // 论文标题常有冒号副标题
+      if (/^[A-Z]/.test(ln)) score += 2;
+      if (fromLabel) score += 20;                                      // 明确写了「标题：」的最可信
+      if (/(?:揭示|研究|mechanism|prediction|analysis|structure|effect|role)\b/i.test(ln)) score += 2;
+      if (!best || score > best.score) best = { value: ln, score: score, from: fromLabel ? 'label_line' : 'line_scan' };
+    }
+    return best ? { value: best.value, from: best.from } : null;
+  }
+
+  function countLatinWords(s) {
+    if (!s) return 0;
+    var m = s.match(/[A-Za-z][A-Za-z'\-]{2,}/g);
+    return m ? m.length : 0;
+  }
+
+  /* ================================================================== *
+   * 作者
+   * ================================================================== */
+
+  var AUTHOR_LABELS = ['作者团队', '作者列表', '全部作者', '文章作者', '论文作者', 'Authors?', '作者', '撰写', '执笔', 'Written\\s*by', 'By'];
+  var FIRST_AUTHOR_LABELS = ['第一作者', '首位作者', 'First\\s*Author'];
+  var CORRESPONDING_LABELS = ['通讯作者', '通信作者', 'Corresponding\\s*Author'];
+
+  var CN_NAME = /^[\u4e00-\u9fa5]{2,4}$/;
+  var EN_NAME_FULL = /^[A-Z][a-zA-Z'\-]+(?:\s+[A-Z]\.?){0,4}\s+[A-Z][a-zA-Z'\-]+$/;
+  var EN_NAME_INITIAL = /^[A-Z][a-zA-Z'\-]+,\s*(?:[A-Z]\.\s*){1,4}$/;
+
+  function splitNames(segment) {
+    if (!segment) return [];
+    // 支持 "张三1, 李四2"、"Jumper, J., Evans, R."、"张三、李四、王五"
+    var cleaned = segment
+      .replace(/[（(][^）)]{0,40}[）)]/g, ' ')          // 去掉单位上标括号
+      .replace(/\s*[*＊†‡§]+\s*/g, ' ')
+      .replace(/\s*\d+(?:\s*,\s*\d+)*\s*(?=[,，、;；]|$)/g, ' ')  // 去掉上标数字
+      .trim();
+
+    var parts = cleaned.split(/[、,，;；]|\s{2,}|\s+(?:and|&)\s+/i);
+    var out = [];
+    parts.forEach(function (p) {
+      var t = p.trim().replace(/^[\s.]+|[\s.]+$/g, '');
+      if (!t) return;
+      if (CN_NAME.test(t)) { out.push(t); return; }
+      if (EN_NAME_FULL.test(t)) { out.push(t); return; }
+      if (EN_NAME_INITIAL.test(t)) { out.push(t); return; }
+      // "Jumper J" / "Jumper J." 这种倒装
+      if (/^[A-Z][a-zA-Z'\-]+\s+(?:[A-Z]\.?){1,3}$/.test(t)) out.push(t);
+    });
+    return out;
+  }
+
+  /** 从一段自由文本里扫英文姓名（作者段专用，避免全文误检）。 */
+  function scanEnglishNames(segment) {
+    if (!segment) return [];
+    var out = [];
+    var re1 = /\b[A-Z][a-zA-Z'\-]{1,20}(?:\s+[A-Z]\.){1,3}\s+[A-Z][a-zA-Z'\-]{1,20}\b/g;
+    var re2 = /\b[A-Z][a-zA-Z'\-]{1,20},\s*(?:[A-Z]\.\s*){1,3}(?=[,;]|\s|$)/g;
+    var m;
+    while ((m = re1.exec(segment)) !== null) if (out.indexOf(m[0]) === -1) out.push(m[0]);
+    while ((m = re2.exec(segment)) !== null) { var v = m[0].trim().replace(/,$/, ''); if (out.indexOf(v) === -1) out.push(v); }
+    return out;
+  }
+
+  function extractAuthors(text) {
+    var seg = labeledValue(text, AUTHOR_LABELS, 260);
+    if (!seg) return null;
+    // 英文作者段（"Jumper, J., Evans, R." 这种）不能按逗号切，否则会把人名切碎。
+    // 先判断整段是否以拉丁字符为主，是则优先走姓名正则扫描。
+    var latin = (seg.match(/[A-Za-z]/g) || []).length;
+    var cjk = (seg.match(/[\u4e00-\u9fa5]/g) || []).length;
+    var list = (latin > cjk * 2) ? scanEnglishNames(seg) : [];
+    if (!list.length) list = splitNames(seg);
+    if (!list.length) list = scanEnglishNames(seg);
+    if (!list.length) return null;
+    return {
+      list: rules.uniq(list).slice(0, 30),
+      raw: seg,
+      evidence: '作者字段：“' + seg.slice(0, 60) + '”'
+    };
+  }
+
+  function extractSingleAuthorField(text, labels) {
+    var v = labeledValue(text, labels, 120);
+    if (!v) return null;
+    var latin = (v.match(/[A-Za-z]/g) || []).length;
+    var cjk = (v.match(/[\u4e00-\u9fa5]/g) || []).length;
+    var list = (latin > cjk * 2) ? scanEnglishNames(v) : [];
+    if (!list.length) list = splitNames(v);
+    return (list.length ? list : [v.trim()]).slice(0, 4);
+  }
+
+  /* ================================================================== *
+   * 期刊 / 出版信息
+   * ================================================================== */
+
+  var JOURNAL_LABELS = ['发表期刊', '期刊名称', '期刊', '杂志', '刊物', '发表杂志', 'Journal', 'Published\\s*in', '刊载于', '发表于', 'Source', '出处'];
+
+  var KNOWN_JOURNALS = [
+    'Nature Reviews Materials', 'Nature Reviews Physics', 'Nature Reviews Chemistry', 'Nature Reviews Cancer',
+    'Nature Communications', 'Nature Biotechnology', 'Nature Medicine', 'Nature Materials', 'Nature Physics',
+    'Nature Chemistry', 'Nature Neuroscience', 'Nature Genetics', 'Nature Methods', 'Nature Energy',
+    'Nature Climate Change', 'Nature Sustainability', 'Nature Human Behaviour', 'Nature Food', 'Nature Water',
+    'Science Advances', 'Science Immunology', 'Science Robotics', 'Science Translational Medicine',
+    'New England Journal of Medicine', 'The Lancet', 'JAMA', 'The BMJ', 'Annals of Internal Medicine',
+    'Physical Review Letters', 'Physical Review X', 'Reviews of Modern Physics',
+    'Journal of the American Chemical Society', 'Angewandte Chemie', 'Advanced Materials', 'Advanced Science',
+    'Chemical Reviews', 'Chemical Society Reviews', 'Energy & Environmental Science',
+    'IEEE Transactions on Pattern Analysis and Machine Intelligence', 'IEEE Transactions on Neural Networks and Learning Systems',
+    'Proceedings of the National Academy of Sciences', 'Cell Research', 'Cell Reports', 'Molecular Cell',
+    'Nature', 'Science', 'Cell', 'PNAS', 'eLife', 'PLOS ONE', 'BMJ Open',
+    // 中文人文社科 / 理工类核心期刊
+    '中国社会科学', '经济研究', '管理世界', '金融研究', '法学研究', '社会学研究', '心理学报', '世界经济',
+    '中国工业经济', '南开管理评论', '会计研究', '中国行政管理', '政治学研究', '新闻与传播研究',
+    '中国科学', '科学通报', '计算机学报', '软件学报', '自动化学报', '电子学报', '物理学报', '化学学报'
+  ];
+  var KNOWN_JOURNALS_SORTED = KNOWN_JOURNALS.slice().sort(function (a, b) { return b.length - a.length; });
+
+  function extractJournal(text, rawTitle) {
+    var v = labeledValue(text, JOURNAL_LABELS, 80);
+    if (v) {
+      var cleaned = v.replace(/\s*[（(]\s*(?:IF|影响因子)[^）)]*[)）]\s*/i, '').replace(/[，,。;；]\s*$/, '').trim();
+      if (cleaned.length >= 2) return { value: cleaned, from: 'label' };
+    }
+    for (var i = 0; i < KNOWN_JOURNALS_SORTED.length; i++) {
+      var j = KNOWN_JOURNALS_SORTED[i];
+      if (text.indexOf(j) !== -1) return { value: j, from: 'known_list' };
+      if ((rawTitle || '').indexOf(j) !== -1) return { value: j, from: 'article_title' };
+    }
+    return null;
+  }
+
+  /** 年 / 卷 / 期 / 页 */
+  function extractNumbering(text) {
+    var out = { year: null, volume: null, issue: null, pages: null, articleNumber: null };
+    var m;
+
+    // ① GB/T 7714 形如：2024, 45(3): 123-135
+    if ((m = text.match(/((?:19|20)\d{2})\s*[,，]\s*(\d{1,4})\s*[（(]\s*(\d{1,4})\s*[)）]\s*[:：]\s*([\dA-Za-z]+\s*[-–—~]\s*[\dA-Za-z]+|\d{1,6})/))) {
+      out.year = +m[1]; out.volume = m[2]; out.issue = m[3]; out.pages = m[4].replace(/\s/g, '');
+    }
+    // ①b 不带年份的「卷(期): 页」，常见于「卷期页：596(7873): 583-589」
+    if (!out.volume && (m = text.match(/(?:^|[\s:：，,（(])(\d{1,4})\s*[（(]\s*(\d{1,4})\s*[)）]\s*[:：]\s*([\dA-Za-z]+\s*[-–—~]\s*[\dA-Za-z]+)/))) {
+      out.volume = m[1]; out.issue = m[2]; out.pages = m[3].replace(/\s/g, '');
+    }
+    // ② APA 形如：Nature, 596(7873), 583-589.
+    if (!out.volume && (m = text.match(/[,，]\s*(\d{1,4})\s*[（(]\s*(\d{1,4})\s*[)）]\s*[,，]\s*([\dA-Za-z]+\s*[-–—~]\s*[\dA-Za-z]+)/))) {
+      out.volume = m[1]; out.issue = m[2]; out.pages = m[3].replace(/\s/g, '');
+    }
+    // ③ Nature 引用形如：Nature 596, 583–589 (2021)
+    if (!out.volume && (m = text.match(/\b(\d{1,4})\s*,\s*([\dA-Za-z]+\s*[-–—~]\s*[\dA-Za-z]+)\s*[（(]\s*((?:19|20)\d{2})\s*[)）]/))) {
+      out.volume = m[1]; out.pages = m[2].replace(/\s/g, ''); out.year = +m[3];
+    }
+    // ④ 标签形式
+    if (!out.year) {
+      m = text.match(/(?:发表(?:时间|年份|日期)?|出版(?:时间|年份)?|年份|Published|Year)\s*[:：]?\s*((?:19|20)\d{2})/i);
+      if (m) out.year = +m[1];
+    }
+    if (!out.year && (m = text.match(/[（(]\s*((?:19|20)\d{2})\s*[)）]/))) out.year = +m[1];
+    if (!out.volume && (m = text.match(/(?:卷|Vol\.?|Volume)\s*[:：]?\s*(\d{1,4})/i))) out.volume = m[1];
+    if (!out.issue && (m = text.match(/(?:期|No\.?|Issue)\s*[:：]?\s*(\d{1,4})/i))) out.issue = m[1];
+    if (!out.pages) {
+      m = text.match(/(?:页码|页\s*码|Pages?|pp\.?)\s*[:：]?\s*([\dA-Za-z]+\s*[-–—~]\s*[\dA-Za-z]+|\d{1,6})/i);
+      if (m) out.pages = m[1].replace(/\s/g, '');
+    }
+    if (!out.articleNumber && (m = text.match(/(?:文章编号|Article\s*(?:number|no\.?))\s*[:：]?\s*([\d.A-Za-z]+)/i))) {
+      out.articleNumber = m[1];
+    }
+    return out;
+  }
+
+  /** 影响因子 / 分区 */
+  function extractMetrics(text) {
+    var out = { impactFactor: null, jcr: null, cas: null, citations: null };
+    var m;
+    if ((m = text.match(/(?:影响因子|IF|Impact\s*Factor)\s*[:：]?\s*([\d.]+)/i))) out.impactFactor = m[1];
+    if ((m = text.match(/\bJCR\s*(?:分区)?\s*[:：]?\s*(Q[1-4])/i))) out.jcr = m[1].toUpperCase();
+    if (!out.jcr && (m = text.match(/(?:JCR|分区)\s*[:：]?\s*(Q[1-4])\b/i))) out.jcr = m[1].toUpperCase();
+    if ((m = text.match(/中科院\s*(?:分区|大类|小类)?\s*[:：]?\s*([一二三四]\s*区)/))) out.cas = m[1].replace(/\s/g, '');
+    if (!out.cas && (m = text.match(/([一二三四])\s*区\s*(?:期刊|Top)?/))) out.cas = m[1] + '区';
+    if ((m = text.match(/(?:被引(?:次数)?|引用次数|Citations?)\s*[:：]?\s*(\d{1,6})/i))) out.citations = +m[1];
+    return (out.impactFactor || out.jcr || out.cas || out.citations) ? out : null;
+  }
+
+  /* ================================================================== *
+   * 摘要 / 关键词
+   * ================================================================== */
+
+  function extractAbstract(text) {
+    var out = { zh: null, en: null };
+    out.zh = sliceSection(text, /(?:^|\n)\s*(?:内容)?摘\s*要\s*[:：]?\s*/, SECTION_STOP, 2000);
+    out.en = sliceSection(text, /(?:^|\n)\s*Abstract\s*[:：]?\s*/i, SECTION_STOP, 2600);
+    // 兜底：正文里没有「摘要：」标签时，中文文献常在开头直接给一段长摘要
+    if (!out.zh && !out.en && text.length > 200) {
+      var first = text.split(/\n\s*\n/).map(function (s) { return s.trim(); })
+        .filter(function (s) { return s.length >= 80 && s.length <= 1200 && /[\u4e00-\u9fa5]/.test(s); })[0];
+      if (first) out.zh = first;
+    }
+    if (!out.zh && !out.en) return null;
+    return out;
+  }
+
+  function extractKeywords(text) {
+    var out = { zh: [], en: [] };
+    var zh = null, en = null;
+    var m = text.match(/(?:关\s*键\s*词|关键字)\s*[:：]?\s*([^\n]{2,300})/);
+    if (m) zh = m[1];
+    m = text.match(/Key\s*words?\s*[:：]?\s*([^\n]{2,300})/i);
+    if (m) en = m[1];
+
+    function split(s) {
+      if (!s) return [];
+      return rules.uniq(s.split(/[;；,，、|/]/).map(function (x) {
+        return x.replace(/^[\s.·]+|[\s.·]+$/g, '').trim();
+      }).filter(function (x) { return x.length >= 2 && x.length <= 40; }));
+    }
+    out.zh = split(zh).slice(0, 20);
+    out.en = split(en).slice(0, 20);
+    return (out.zh.length || out.en.length) ? out : null;
+  }
+
+  /* ================================================================== *
+   * 论文类型 / 开放获取
+   * ================================================================== */
+
+  var PAPER_TYPES = [
+    [/综述|Review\b|研究进展|系统评价|Meta[- ]?分析|Meta-analysis/i, '综述'],
+    [/预印本|preprint|arXiv|bioRxiv|medRxiv|SSRN/i, '预印本'],
+    [/学位论文|博士学位论文|硕士学位论文|毕业论文|Dissertation|Thesis/i, '学位论文'],
+    [/会议论文|Proceedings|Conference|研讨会|Workshop|Symposium/i, '会议论文'],
+    [/社论|Editorial|评论|Commentary|Perspective|观点|News\s*&?\s*Views/i, '评论/社论'],
+    [/病例报告|Case\s*Report/i, '病例报告'],
+    [/勘误|Erratum|Correction|撤稿|Retraction/i, '勘误/撤稿']
+  ];
+
+  function extractPaperType(text) {
+    for (var i = 0; i < PAPER_TYPES.length; i++) {
+      if (PAPER_TYPES[i][0].test(text)) return { value: PAPER_TYPES[i][1], from: 'keyword' };
+    }
+    return { value: '研究论文', from: 'default' };
+  }
+
+  function detectOpenAccess(urls, journal) {
+    var s = (urls || []).join(' ') + ' ' + (journal || '');
+    if (/pmc\.ncbi|doi\.org\/10\.1371|plos\.org|frontiersin|mdpi\.com|elife|nature\.com\/articles\/.*#?.*(?:open|OA)/i.test(s)) return true;
+    if (/arXiv|bioRxiv|medRxiv|SSRN|ResearchGate/i.test(s)) return true;
+    if (/PLOS|Frontiers|MDPI|eLife|Nature Communications|Science Advances|Open Access/i.test(journal || '')) return true;
+    return false;
+  }
+
+  /* ================================================================== *
+   * 引用格式
+   * ================================================================== */
+
+  /**
+   * GB/T 7714 作者写法：姓 + 空格 + 名首字母（**首字母后不加点**）。
+   * 例："Jumper, J." → "Jumper J"；"Jumper, J. A." → "Jumper J A"；"张三" 原样保留。
+   */
+  function gbtAuthor(name) {
+    var t = String(name || '').trim();
+    function initials(s) { return s.replace(/[.\s]+/g, ' ').trim(); }   // "J. A." → "J A"
+    var m = t.match(/^([A-Z][a-zA-Z'\-]+),\s*((?:[A-Z]\.?\s*){1,4})$/);
+    if (m) return m[1] + ' ' + initials(m[2]);
+    var m2 = t.match(/^([A-Z][a-zA-Z'\-]+)\s+((?:[A-Z]\.?\s*){1,4})$/);
+    if (m2) return m2[1] + ' ' + initials(m2[2]);
+    // "Jumper J. A." / "Jumper J A" 倒装式
+    var m3 = t.match(/^([A-Z][a-zA-Z'\-]+)(?:\s+[A-Z]\.?){1,3}$/);
+    if (m3) return m3[1] + ' ' + t.slice(m3[1].length).replace(/[.\s]+/g, ' ').trim();
+    return t;
+  }
+
+  /** BibTeX 作者写法：姓, 名首字母（保留点号）。 */
+  function bibAuthor(name) {
+    var t = String(name || '').trim();
+    if (/^[A-Z][a-zA-Z'\-]+,\s*(?:[A-Z]\.?\s*){1,4}$/.test(t)) {
+      return t.replace(/\s+/g, ' ').replace(/,\s*/, ', ').trim();
+    }
+    var m = t.match(/^([A-Z][a-zA-Z'\-]+)\s+((?:[A-Z]\.?\s*){1,4})$/);
+    if (m) return m[1] + ', ' + m[2].trim();
+    return t;
+  }
+
+  /** "Jumper, J." 保持；"张三" 不做音译，原样保留。 */
+  function apaAuthor(name) {
+    var t = String(name || '').trim();
+    if (/^[A-Z][a-zA-Z'\-]+,\s*(?:[A-Z]\.\s*){1,4}$/.test(t)) return t.replace(/\s+/g, ' ').trim();
+    var m = t.match(/^([A-Z][a-zA-Z'\-]+)\s+((?:[A-Z]\.\s*){1,4})$/);
+    if (m) return m[1] + ', ' + m[2].replace(/\s+/g, ' ').trim();
+    return t;
+  }
+
+  function joinAuthors(list, mapper, sep, max, ellipsis) {
+    var arr = (list || []).slice(0, max).map(mapper);
+    var s = arr.join(sep);
+    if ((list || []).length > max) s += ellipsis;
+    return s;
+  }
+
+  /** APA 7 的作者串：≤20 人全列，末位前加 &；>20 人列前 19 + … + 末位。 */
+  function apaAuthorList(list) {
+    var arr = (list || []).map(apaAuthor);
+    if (!arr.length) return '';
+    if (arr.length === 1) return arr[0];
+    if (arr.length > 20) return arr.slice(0, 19).join(', ') + ', ... ' + arr[arr.length - 1];
+    return arr.slice(0, -1).join(', ') + ', & ' + arr[arr.length - 1];
+  }
+
+  function buildCitations(paper) {
+    var authors = paper.authors || [];
+    var isEn = authors.length ? !/^[\u4e00-\u9fa5]/.test(authors[0]) : false;
+    // 著录用的题名要与作者语种一致：英文文献引用英文原题，中文文献引用中文题名。
+    // 若只有推文里的中译标题、而作者是英文，仍优先用英文原题，避免"英文文献配中译题名"的怪结果。
+    var title;
+    if (isEn) title = paper.titleEn || paper.title || paper.titleZh || '';
+    else title = paper.titleZh || paper.title || paper.titleEn || '';
+    var journal = paper.journal || '';
+    var y = paper.year || '';
+    var vol = paper.volume || '';
+    var iss = paper.issue || '';
+    var pg = paper.pages || paper.articleNumber || '';
+    var doi = paper.doi || '';
+    var ellipsis = isEn ? ', et al' : ', 等';
+
+    var out = {};
+
+    // GB/T 7714-2015
+    var aGbt = authors.length ? joinAuthors(authors, gbtAuthor, ', ', 3, ellipsis) : '';
+    var loc = [y, vol ? vol + (iss ? '(' + iss + ')' : '') : ''].filter(Boolean).join(', ');
+    var gbt = [aGbt ? aGbt + '.' : '', title + '[J].', journal ? journal + ',' : '', loc ? loc + (pg ? ': ' + pg : '') + '.' : (pg ? ': ' + pg + '.' : '')]
+      .filter(Boolean).join(' ').replace(/\s+\./g, '.').replace(/\s+/g, ' ').trim();
+    if (doi) gbt += ' DOI:' + doi + '.';
+    out.gbt7714 = gbt;
+
+    // APA 7th
+    var aApa = apaAuthorList(authors);
+    if (aApa && !/\.$/.test(aApa)) aApa += '.';
+    var apa = [aApa ? aApa + ' ' : '', y ? '(' + y + '). ' : '', title ? title + '. ' : '',
+      journal ? journal : '', vol ? ', ' + vol : '', iss ? '(' + iss + ')' : '', pg ? ', ' + pg : '', '.']
+      .filter(Boolean).join('').replace(/\s+\./g, '.').replace(/\s+/g, ' ').trim();
+    if (doi) apa += ' https://doi.org/' + doi;
+    out.apa = apa;
+
+    // BibTeX
+    var key = (authors[0] ? authors[0].replace(/[^A-Za-z\u4e00-\u9fa5]/g, '') : 'ref') + (y || '');
+    var ba = authors.map(function (a) { return bibAuthor(a); }).join(' and ');
+    var lines = [
+      '@article{' + key + ',',
+      '  author  = {' + ba + '},',
+      '  title   = {' + title + '},',
+      journal ? '  journal = {' + journal + '},' : null,
+      y ? '  year    = {' + y + '},' : null,
+      vol ? '  volume  = {' + vol + '},' : null,
+      iss ? '  number  = {' + iss + '},' : null,
+      pg ? '  pages   = {' + pg + '},' : null,
+      doi ? '  doi     = {' + doi + '},' : null,
+      '}'
+    ].filter(Boolean);
+    out.bibtex = lines.join('\n');
+
+    // 纯文本一行式，方便粘到笔记里
+    out.oneline = [aGbt, title, journal, loc, pg].filter(Boolean).join('. ').replace(/\.\s*\./g, '.').trim();
+
+    return out;
+  }
+
+  /* ================================================================== *
+   * 主入口
+   * ================================================================== */
+
+  function extract(raw) {
+    var text = raw.contentText || '';
+    var title = raw.title || '';
+    var hay = title + '\n' + (raw.description || '') + '\n' + text;
+
+    var ids = extractIdentifiers(hay);
+    var titleZh = extractTitleZh(raw, text);
+    var titleEnRaw = extractTitleEn(text);
+    // 若推文标题本身是英文，切到英文槽位
+    if (!titleEnRaw && titleZh && !/[\u4e00-\u9fa5]/.test(titleZh.value)) {
+      titleEnRaw = { value: titleZh.value, from: titleZh.from + '(en)' };
+      titleZh = null;
+    }
+
+    var authors = extractAuthors(text);
+    var firstAuthor = extractSingleAuthorField(text, FIRST_AUTHOR_LABELS);
+    var corrAuthor = extractSingleAuthorField(text, CORRESPONDING_LABELS);
+    var journal = extractJournal(text, title);
+    var numbering = extractNumbering(text);
+    var metrics = extractMetrics(text);
+    var abstract = extractAbstract(text);
+    var keywords = extractKeywords(text);
+    var paperType = extractPaperType(hay);
+
+    var paper = {
+      titleZh: titleZh ? titleZh.value : null,
+      titleEn: titleEnRaw ? titleEnRaw.value : null,
+      title: (titleZh && titleZh.value) || (titleEnRaw && titleEnRaw.value) || rules.normalize(title) || null,
+      authors: authors ? authors.list : [],
+      authorsEvidence: authors ? authors.evidence : null,
+      firstAuthor: firstAuthor,
+      correspondingAuthor: corrAuthor,
+      journal: journal ? journal.value : null,
+      journalEvidence: journal ? journal.from : null,
+      year: numbering.year,
+      volume: numbering.volume,
+      issue: numbering.issue,
+      pages: numbering.pages,
+      articleNumber: numbering.articleNumber,
+      doi: ids.doi,
+      dois: ids.dois,
+      arxiv: ids.arxiv,
+      pmid: ids.pmid,
+      isbn: ids.isbn,
+      impactFactor: metrics ? metrics.impactFactor : null,
+      jcr: metrics ? metrics.jcr : null,
+      cas: metrics ? metrics.cas : null,
+      citations: metrics ? metrics.citations : null,
+      abstractZh: abstract ? abstract.zh : null,
+      abstractEn: abstract ? abstract.en : null,
+      keywordsZh: keywords ? keywords.zh : [],
+      keywordsEn: keywords ? keywords.en : [],
+      paperType: paperType.value,
+      openAccess: false
+    };
+
+    paper.citations = buildCitations(paper);
+
+    var warnings = [];
+    if (!paper.titleZh && !paper.titleEn) warnings.push('未能识别出明确的论文标题，请人工确认。');
+    if (!paper.doi && !paper.arxiv && !paper.pmid) warnings.push('未在正文中发现 DOI / arXiv / PMID 等唯一标识符。');
+    if (!paper.authors.length) warnings.push('未能从正文中提取到作者列表（公众号推文常省略或只写团队名）。');
+    if (!paper.journal) warnings.push('未能识别期刊名，可能只提供了标题与链接。');
+    if (paper.year && paper.year > new Date().getFullYear() + 1) warnings.push('识别到的年份 ' + paper.year + ' 异常，请核对。');
+
+    return {
+      fields: {
+        paper: paper,
+        org: null, batch: null, recruitType: null, deadline: null,
+        education: null, majors: null, positions: null, locations: null,
+        headcount: null, contacts: null
+      },
+      paper: paper,
+      warnings: warnings
+    };
+  }
+
+  /** 给出文献相关的链接分组（供 links.js 打分使用）。 */
+  function linkKind(url, host) {
+    var u = String(url || '');
+    if (/\.pdf(\?|$)/i.test(u)) return 'pdf';
+    if (/^10\.\d{4,9}\//.test(u)) return 'doi';
+    if (/(?:^|\.)doi\.org$/.test(host) || /dx\.doi\.org$/.test(host)) return 'doi';
+    if (/arxiv\.org|biorxiv\.org|medrxiv\.org|ssrn\.com|preprints?\.org|researchsquare/i.test(host)) return 'preprint';
+    if (/pubmed|ncbi\.nlm\.nih\.gov|pmc\.ncbi/i.test(host)) return 'database';
+    if (/cnki\.net|wanfangdata|cqvip|x-mol\.com|xueshu\.baidu|scholar\.google|semanticscholar|openreview|researchgate|scilit|sci-hub/i.test(host)) return 'database';
+    if (classifyPublisherRe().test(host)) return 'publisher';
+    return null;
+  }
+
+  var _pubRe = null;
+  function classifyPublisherRe() {
+    if (!_pubRe) {
+      _pubRe = /(?:nature\.com|science\.org|sciencedirect|springer|wiley|ieeexplore|acs\.org|rsc\.org|tandfonline|sagepub|frontiersin|mdpi\.com|plos\.org|cell\.com|nejm\.org|thelancet|bmj\.com|jamanetwork|pnas\.org|iopscience|aps\.org|annualreviews|karger|thieme|jstor|cambridge\.org|oxford|academic\.oup\.com|epfl|cell\.com|elifesciences)/i;
+    }
+    return _pubRe;
+  }
+
+  return {
+    extract: extract,
+    linkKind: linkKind,
+    classifyPublisherRe: classifyPublisherRe,
+    extractIdentifiers: extractIdentifiers,
+    extractDois: extractDois,
+    normalizeDoi: normalizeDoi,
+    extractAuthors: extractAuthors,
+    extractJournal: extractJournal,
+    extractNumbering: extractNumbering,
+    extractMetrics: extractMetrics,
+    extractAbstract: extractAbstract,
+    extractKeywords: extractKeywords,
+    buildCitations: buildCitations,
+    extractTitleZh: extractTitleZh,
+    extractTitleEn: extractTitleEn,
+    extractPaperType: extractPaperType,
+    detectOpenAccess: detectOpenAccess,
+    KNOWN_JOURNALS: KNOWN_JOURNALS
+  };
+});
+
 /* ==================== src/core/parse.js ==================== */
 /*!
  * 微信求职信息提取器 — 文章解析层 (parse.js)
@@ -1165,6 +2094,15 @@
     if (typeof source.querySelector === 'function') return parseDocument(source, options.baseUrl);
     if (source.document) return parseDocument(source.document, options.baseUrl);
     if (source.html) return parseSource(source.html, options);
+    // 已经是本模块产出的「原始素材」结构（编程接口/测试里手写的输入）→ 直接透传，
+    // 否则会被当成空 HTML 静默丢掉，是很难排查的坑。
+    if (typeof source.contentText === 'string' && Array.isArray(source.anchors)) {
+      return Object.assign({
+        origin: 'raw', baseUrl: options.baseUrl || '', title: '', account: '', author: '',
+        publishTime: '', description: '', contentHtml: '', images: [], readOriginal: null,
+        bareUrls: [], scriptVars: {}, canonicalUrl: null, structuredData: null, warnings: []
+      }, source);
+    }
     return parseHtml('', options.baseUrl);
   }
 
@@ -1185,31 +2123,322 @@
   };
 });
 
-/* ==================== src/core/fields.js ==================== */
+/* ==================== src/core/links.js ==================== */
 /*!
- * 微信求职信息提取器 — 字段抽取层 (fields.js)
- * 输入 parse.js 的「原始素材」，输出结构化求职信息（含证据与置信度）。
+ * 微信求职信息提取器 — 链接归集与打分 (links.js)
+ *
+ * 同一批链接在不同画像下"哪个才是关键链接"完全不同：
+ *   招聘画像 → 投递入口（招聘官网 / 网申系统）
+ *   文献画像 → 原文链接（DOI 解析页 / 出版社 / 预印本 / PDF / 文献库）
+ * 因此打分分两层：通用基础分（rules.scoreLink）+ 画像加成。
  */
 (function (root, factory) {
   var api = factory(
     (typeof module !== 'undefined' && module.exports)
-      ? { rules: require('./rules.js'), parse: require('./parse.js') }
-      : { rules: root && root.WJE && root.WJE.rules, parse: root && root.WJE && root.WJE.parse }
+      ? { rules: require('./rules.js'), parse: require('./parse.js'), literature: require('./profiles/literature.js') }
+      : null   // 浏览器里不在此刻取依赖，改为调用时惰性解析（见 dep()）
   );
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
-  if (root) { root.WJE = root.WJE || {}; root.WJE.fields = api; }
+  if (root) { root.WJE = root.WJE || {}; root.WJE.links = api; }
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (nodeDeps) {
+  'use strict';
+
+  // ── 依赖解析 ─────────────────────────────────────────────────────────
+  // 内容脚本是按 manifest 里的顺序逐个加载的普通脚本，模块间存在依赖时，
+  // 在「加载时」取依赖会引入脆弱的顺序耦合（曾经因为 links.js 排在 parse.js
+  // 之前而整条链路拿到 undefined）。这里改成调用时解析，顺序就不再重要。
+  var _cache = {};
+  function dep(name) {
+    if (nodeDeps && nodeDeps[name]) return nodeDeps[name];
+    if (_cache[name]) return _cache[name];
+    var w = (typeof globalThis !== 'undefined' ? globalThis : {});
+    var W = w.WJE || {};
+    var v = name === 'literature'
+      ? (W.profiles && W.profiles.literature)
+      : W[name];
+    if (v) _cache[name] = v;
+    return v;
+  }
+  function rulesMod() { return dep('rules'); }
+  function parseMod() { return dep('parse'); }
+  function litMod() { return dep('literature'); }
+
+  var LIT_ANCHOR = /(原文|全文|PDF|下载|阅读|查看|链接|DOI|doi|原文地址|原文链接|文章链接|获取全文|Access|Full\s*Text|Download|View)/;
+  var LIT_ASSET_NOISE = /\.(png|jpe?g|gif|webp|svg|mp4|mp3|zip|rar|docx?|xlsx?|pptx?)$/i;
+
+  var KIND_BONUS = {
+    doi: 80,
+    preprint: 72,
+    publisher: 66,
+    database: 56,
+    pdf: 52
+  };
+
+  var KIND_LABEL = {
+    doi: 'DOI 解析页',
+    preprint: '预印本',
+    publisher: '出版社官网',
+    database: '文献数据库',
+    pdf: 'PDF 全文',
+    ats: '招聘系统',
+    official: '官网/官方域名',
+    redirect: '跳转中间页',
+    wechat: '微信站内',
+    other: '其他',
+    invalid: '无效'
+  };
+
+  function label(kind) { return KIND_LABEL[kind] || kind; }
+
+  /** 综合打分：基础分 + 画像加成。 */
+  function scoreOne(item, profile) {
+    var rules = rulesMod();
+    var literature = litMod();
+    var base = rules.scoreLink(item.originalUrl || item.url, item.text, item.near);
+    var score = base.score;
+    var reasons = base.reasons.slice();
+    var kind = base.kind;
+
+    if (profile === 'literature') {
+      var lk = literature.linkKind(item.url, item.host);
+      if (lk) {
+        kind = lk;
+        score += KIND_BONUS[lk] || 0;
+        reasons.push('学术出版资源（' + label(lk) + '，+' + (KIND_BONUS[lk] || 0) + '）');
+      }
+      if (LIT_ANCHOR.test(item.text || '')) { score += 20; reasons.push('锚文本指向全文/原文'); }
+      if (item.near && /(原文|全文|DOI|链接|文献)/.test(item.near)) { score += 12; reasons.push('邻近“原文/全文”语义'); }
+      // 文献画像下，招聘域名不该拿高分
+      if (/job|zhaopin|recruit|campus|career|wecruit|hotjob|51job/i.test(item.host || '')) {
+        score -= 25; reasons.push('招聘类域名，文献画像下降权');
+      }
+    }
+
+    if (LIT_ASSET_NOISE.test(item.url)) { score -= 40; reasons.push('静态资源文件'); }
+
+    return { score: score, kind: kind, reasons: reasons };
+  }
+
+  /**
+   * 归集正文所有链接并打分排序。
+   * @param {object} raw parse.js 的原始素材
+   * @param {string} profile 'recruit' | 'literature' | 'general'
+   */
+  function classifyAndRank(raw, profile) {
+    var rules = rulesMod();
+    var parse = parseMod();
+    profile = profile || 'recruit';
+    var seen = Object.create(null);
+    var list = [];
+
+    function add(url, text, near, source) {
+      if (!url) return;
+      var abs = parse.absolutize(url, raw.baseUrl);
+      if (!abs) return;
+      var unwrapped = rules.unwrapUrl(abs);
+      var key = unwrapped.replace(/[#?].*$/, '').replace(/\/$/, '').toLowerCase();
+      if (seen[key]) {
+        var ex = seen[key];
+        if (text && ex.text.indexOf(text) === -1) ex.text = (ex.text ? ex.text + ' / ' : '') + text;
+        if (source && ex.sources.indexOf(source) === -1) ex.sources.push(source);
+        return;
+      }
+      var item = {
+        url: unwrapped,
+        originalUrl: abs,
+        host: rules.safeHost(unwrapped),
+        text: text || '',
+        near: near || '',
+        kind: 'other',
+        score: 0,
+        reasons: [],
+        sources: source ? [source] : []
+      };
+      var sc = scoreOne(item, profile);
+      item.kind = sc.kind;
+      item.score = sc.score;
+      item.reasons = sc.reasons;
+      seen[key] = item;
+      list.push(item);
+    }
+
+    if (raw.readOriginal && raw.readOriginal.url) {
+      add(raw.readOriginal.url, raw.readOriginal.text || '阅读原文', '阅读原文', 'read_original:' + raw.readOriginal.from);
+    }
+    (raw.anchors || []).forEach(function (a) {
+      if (!a.href) return;
+      var abs = parse.absolutize(a.href, raw.baseUrl) || '';
+      if (/mmbiz\.qpic\.cn|mmbiz\.qlogo\.cn|res\.wx\.qq\.com/.test(rules.safeHost(abs))) return;
+      add(a.href, a.text, a.near, 'content_anchor');
+    });
+    (raw.bareUrls || []).forEach(function (b) { add(b.url, '(正文文本)', b.near, 'content_text'); });
+
+    list.forEach(function (it) {
+      if (/read_original/.test(it.sources.join(','))) {
+        it.score += profile === 'literature' ? 10 : 18;
+        it.reasons.push('来自「阅读原文」');
+      }
+    });
+
+    list.sort(function (a, b) { return b.score - a.score; });
+
+    var threshold = profile === 'literature' ? 40 : 25;
+    var primary = list.filter(function (i) {
+      return i.score >= threshold && i.kind !== 'wechat' && !LIT_ASSET_NOISE.test(i.url);
+    });
+    // 兜底：一个都没过线时，至少把最高的站外链接拿出来
+    if (!primary.length) {
+      var fallback = list.filter(function (i) { return i.kind !== 'wechat' && i.kind !== 'invalid'; });
+      if (fallback.length) primary = [fallback[0]];
+    }
+
+    var groups = { doi: [], preprint: [], publisher: [], database: [], pdf: [] };
+    list.forEach(function (i) { if (groups[i.kind]) groups[i.kind].push(i); });
+
+    return {
+      all: list,
+      primary: primary,
+      apply: primary,               // 招聘画像下的别名，保持向后兼容
+      best: primary[0] || null,
+      groups: groups,
+      profile: profile
+    };
+  }
+
+  return {
+    classifyAndRank: classifyAndRank,
+    scoreOne: scoreOne,
+    label: label,
+    KIND_LABEL: KIND_LABEL
+  };
+});
+
+/* ==================== src/core/insights.js ==================== */
+/*!
+ * 微信求职信息提取器 — 关键句与摘要 (insights.js)
+ * 关键句关键词随画像变化：招聘看「投递/截止」，文献看「DOI/作者/期刊」。
+ */
+(function (root, factory) {
+  var api = factory();
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  if (root) { root.WJE = root.WJE || {}; root.WJE.insights = api; }
+})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+
+  var PATTERNS = {
+    recruit: /(投递|网申|报名|申请|截止|官网|阅读原文|简历投递|校招|校园招聘|招聘系统|扫码|网申地址|投递地址|投递方式|联系方式|笔试|面试)/,
+    literature: /(DOI|doi|arXiv|PMID|作者|期刊|发表|影响因子|分区|摘要|关键词|引用|原文|全文|PDF|通讯作者|第一作者|参考文献|课题组|单位|接受|投稿|Accepted|Published)/i,
+    general: /(来源|原文|阅读原文|链接|作者|时间|地点|联系|电话|邮箱|详情|报名|截止)/
+  };
+
+  var SENTENCE_SPLIT = /(?<=[。！？；!?;\n])/;
+
+  function splitSentences(text) {
+    if (!text) return [];
+    var parts;
+    try {
+      parts = text.split(SENTENCE_SPLIT);
+    } catch (e) {
+      // 极老环境不支持 lookbehind，退化为按标点切分
+      parts = text.replace(/([。！？；!?;\n])/g, '$1\u0001').split('\u0001');
+    }
+    return parts.map(function (s) { return s.trim(); }).filter(function (s) { return s.length >= 6 && s.length <= 240; });
+  }
+
+  /**
+   * 抽取关键句。
+   * @param {string} text
+   * @param {number} limit
+   * @param {string} profile
+   */
+  function findKeySentences(text, limit, profile) {
+    limit = limit || 12;
+    var re = PATTERNS[profile] || PATTERNS.general;
+    var sentences = splitSentences(text);
+    var hits = sentences.filter(function (s) { return re.test(s); });
+
+    // 去重（按前 30 字）
+    var seen = Object.create(null), out = [];
+    hits.forEach(function (s) {
+      var k = s.slice(0, 30);
+      if (seen[k]) return;
+      seen[k] = 1;
+      out.push(s);
+    });
+
+    // 若关键词命中太少，补几条长句（往往是摘要/正文要点）
+    if (out.length < 3) {
+      var extra = sentences
+        .filter(function (s) { return s.length >= 30 && out.indexOf(s) === -1; })
+        .sort(function (a, b) { return b.length - a.length; })
+        .slice(0, 3);
+      extra.forEach(function (s) {
+        var k = s.slice(0, 30);
+        if (!seen[k]) { seen[k] = 1; out.push(s); }
+      });
+    }
+    return out.slice(0, limit);
+  }
+
+  /** 一行速览。 */
+  function buildSummary(profile, fields, links) {
+    var parts = [];
+    if (profile === 'literature' || profile === 'hybrid') {
+      var p = fields.paper;
+      if (p) {
+        if (p.title) parts.push(p.title.length > 60 ? p.title.slice(0, 60) + '…' : p.title);
+        if (p.authors && p.authors.length) {
+          parts.push(p.authors.slice(0, 3).join(', ') + (p.authors.length > 3 ? ' 等' : ''));
+        }
+        if (p.journal) parts.push(p.journal);
+        if (p.year) parts.push(String(p.year));
+        if (p.doi) parts.push('DOI ' + p.doi);
+      }
+    }
+    if (profile === 'recruit' || profile === 'hybrid') {
+      var r = [];
+      if (fields.org) r.push(fields.org.value);
+      if (fields.batch) r.push(fields.batch.value);
+      if (fields.recruitType) r.push(fields.recruitType.value);
+      if (r.length) parts = parts.concat(r);
+      if (fields.deadline) parts.push('截止 ' + fields.deadline.value);
+    }
+    if (links && links.best) parts.push('主链接 ' + links.best.host);
+    return parts.join(' · ');
+  }
+
+  return {
+    findKeySentences: findKeySentences,
+    buildSummary: buildSummary,
+    splitSentences: splitSentences,
+    PATTERNS: PATTERNS
+  };
+});
+
+/* ==================== src/core/profiles/recruit.js ==================== */
+/*!
+ * 微信求职信息提取器 — 招聘画像 (profiles/recruit.js)
+ * 从 fields.js 拆出：机构名识别 + 批次/类型/截止/学历/专业/岗位/地点/人数/联系方式。
+ */
+(function (root, factory) {
+  var api = factory(
+    (typeof module !== 'undefined' && module.exports)
+      ? { rules: require('../rules.js') }
+      : { rules: root && root.WJE && root.WJE.rules }
+  );
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  if (root) {
+    root.WJE = root.WJE || {};
+    root.WJE.profiles = root.WJE.profiles || {};
+    root.WJE.profiles.recruit = api;
+  }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (deps) {
   'use strict';
 
   var rules = deps.rules;
-  var parse = deps.parse;
-
-  var ARTICLE_KIND_IMAGE = 'image';
-  var ARTICLE_KIND_TEXT = 'text';
-  var ARTICLE_KIND_MIXED = 'mixed';
 
   /* ------------------------------------------------------------------ *
-   * 机构名
+   * 机构名（三阶段）
    * ------------------------------------------------------------------ */
 
   function pickOrg(raw) {
@@ -1247,7 +2476,7 @@
     function push(name, weight, base, from) {
       var s = base + weight;
       if (freq[name]) s += Math.min(freq[name], 8) * 3;
-      if (inTitle[name] && from !== 'title') s += 25;      // 标题与正文互相印证
+      if (inTitle[name] && from !== 'title') s += 25;
       if (firstIdx[name] !== undefined) s += Math.max(0, 20 - firstIdx[name] / 200);
       scored.push({ name: name, score: s, from: from });
     }
@@ -1277,117 +2506,21 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * 链接
-   * ------------------------------------------------------------------ */
-
-  function classifyAndRank(raw) {
-    var seen = Object.create(null);
-    var list = [];
-
-    function add(url, text, near, source) {
-      if (!url) return;
-      var abs = parse.absolutize(url, raw.baseUrl);
-      if (!abs) return;
-      var unwrapped = rules.unwrapUrl(abs);
-      var key = unwrapped.replace(/[#?].*$/, '').replace(/\/$/, '').toLowerCase();
-      if (seen[key]) {
-        // 合并锚文本
-        var ex = seen[key];
-        if (text && ex.text.indexOf(text) === -1) ex.text = (ex.text ? ex.text + ' / ' : '') + text;
-        if (source && ex.sources.indexOf(source) === -1) ex.sources.push(source);
-        return;
-      }
-      var sc = rules.scoreLink(unwrapped, text, near);
-      var item = {
-        url: unwrapped,
-        originalUrl: abs,
-        host: rules.safeHost(unwrapped),
-        text: text || '',
-        near: near || '',
-        kind: sc.kind,
-        score: sc.score,
-        reasons: sc.reasons,
-        sources: source ? [source] : []
-      };
-      seen[key] = item;
-      list.push(item);
-    }
-
-    // 阅读原文优先
-    if (raw.readOriginal && raw.readOriginal.url) {
-      add(raw.readOriginal.url, raw.readOriginal.text || '阅读原文', '阅读原文', 'read_original:' + raw.readOriginal.from);
-    }
-    // 正文锚点
-    (raw.anchors || []).forEach(function (a) {
-      if (!a.href) return;
-      var host = rules.safeHost(parse.absolutize(a.href, raw.baseUrl) || '');
-      if (/mmbiz\.qpic\.cn|mmbiz\.qlogo\.cn|res\.wx\.qq\.com/.test(host)) return;  // 图片/表情链接
-      add(a.href, a.text, a.near, 'content_anchor');
-    });
-    // 正文纯文本 URL
-    (raw.bareUrls || []).forEach(function (b) { add(b.url, '(正文文本)', b.near, 'content_text'); });
-
-    // 从「阅读原文」推导投递标记
-    list.forEach(function (it) {
-      if (/read_original/.test(it.sources.join(','))) {
-        it.score += 18;
-        it.reasons.push('来自「阅读原文」');
-      }
-    });
-
-    list.sort(function (a, b) { return b.score - a.score; });
-    var apply = list.filter(function (i) { return i.score >= 25 && i.kind !== 'wechat' && !/\.(png|jpe?g|gif|webp|svg)$/i.test(i.url); });
-    return { all: list, apply: apply, best: apply[0] || null };
-  }
-
-  /* ------------------------------------------------------------------ *
-   * 关键句
-   * ------------------------------------------------------------------ */
-
-  var KEY_SENTENCE_RE = /(投递|网申|报名|申请|截止|官网|阅读原文|简历投递|校招|校园招聘|招聘系统|扫码|网申地址|投递地址|投递方式)/;
-
-  function findKeySentences(text, limit) {
-    limit = limit || 12;
-    if (!text) return [];
-    var sentences = text
-      .split(/(?<=[。！？；\n])/)
-      .map(function (s) { return s.trim(); })
-      .filter(function (s) { return s.length >= 6 && s.length <= 220; });
-    var hits = sentences.filter(function (s) { return KEY_SENTENCE_RE.test(s); });
-    // 去重（按前 30 字）
-    var seen = Object.create(null), out = [];
-    hits.forEach(function (s) {
-      var k = s.slice(0, 30);
-      if (seen[k]) return;
-      seen[k] = 1;
-      out.push(s);
-    });
-    return out.slice(0, limit);
-  }
-
-  /* ------------------------------------------------------------------ *
    * 主入口
    * ------------------------------------------------------------------ */
 
-  function extractFields(raw, options) {
+  function extract(raw, options) {
     options = options || {};
     var text = raw.contentText || '';
     var title = raw.title || '';
     var haystack = [title, raw.account, raw.description, text].filter(Boolean).join('\n');
     var head = [title, raw.description, text.slice(0, 600)].filter(Boolean).join('\n');
 
-    var textLength = text.replace(/\s/g, '').length;
-    var imageCount = (raw.images || []).length;
-    var kind = ARTICLE_KIND_TEXT;
-    if (textLength < 120 && imageCount >= 3) kind = ARTICLE_KIND_IMAGE;
-    else if (textLength < 500 && imageCount >= 6) kind = ARTICLE_KIND_MIXED;
-
     var batch = rules.extractBatch(haystack);
     var recruitType = rules.extractRecruitType([title, raw.account, text.slice(0, 400)].filter(Boolean).join('\n'));
 
-    // 截止年份的推断顺序：发布时间 > 当年 > （届别年份 - 1）。
-    // 注意：「2027届」是毕业年份，其校招截止日期通常落在前一年（2026），
-    // 因此届别年份只能作为最后兜底，绝不能优先于发布时间。
+    // 截止年份推断顺序：发布时间 > 当年 > （届别年份 − 1）。
+    // 「2027届」是毕业年份，校招截止通常落在前一年，故届别年份只能兜底。
     var publishYear = guessYear(raw.publishTime);
     var nowYear = options.nowYear || new Date().getFullYear();
     var yearGuess = publishYear || nowYear || (batch && batch.year ? batch.year - 1 : null);
@@ -1398,39 +2531,337 @@
     var fields = {
       org: pickOrg(raw),
       batch: batch ? { value: batch.label, year: batch.year, raw: batch.raw, evidence: '匹配“' + batch.raw + '”', confidence: 'high' } : null,
-      recruitType: recruitType ? { value: recruitType.value, raw: recruitType.raw, evidence: '匹配“' + recruitType.raw + '”', confidence: /校园招聘|校招/.test(recruitType.raw) ? 'high' : 'medium' } : null,
+      recruitType: recruitType ? {
+        value: recruitType.value, raw: recruitType.raw,
+        evidence: '匹配“' + recruitType.raw + '”',
+        confidence: /校园招聘|校招/.test(recruitType.raw) ? 'high' : 'medium'
+      } : null,
       deadline: deadline ? {
-        value: deadline.value,
-        raw: deadline.raw,
-        evidence: deadline.evidence,
-        confidence: (deadline.yearAssumed ? 'medium' : 'high')
+        value: deadline.value, raw: deadline.raw, evidence: deadline.evidence,
+        confidence: deadline.yearAssumed ? 'medium' : 'high'
       } : null,
       education: rules.extractEducation(text),
       majors: rules.extractMajors(text),
       positions: rules.extractPositions(text),
       locations: rules.extractLocations(text),
       headcount: rules.extractHeadcount(text),
-      contacts: rules.extractContacts(text)
+      contacts: rules.extractContacts(text),
+      paper: null
     };
 
-    var links = classifyAndRank(raw);
-    // 「阅读原文」是微信推文最关键的投递入口来源，显式保留在结果里
-    links.readOriginal = raw.readOriginal && raw.readOriginal.url
-      ? { url: rules.unwrapUrl(raw.readOriginal.url), from: raw.readOriginal.from, text: raw.readOriginal.text || '阅读原文' }
+    var warnings = [];
+    if (fields.org && fields.org.confidence === 'low') warnings.push('招聘主体为推测结果，请人工确认。');
+
+    return { fields: fields, warnings: warnings };
+  }
+
+  function guessYear(publishTime) {
+    var m = String(publishTime || '').match(/(20\d{2})/);
+    return m ? +m[1] : null;
+  }
+
+  return {
+    extract: extract,
+    pickOrg: pickOrg,
+    guessYear: guessYear
+  };
+});
+
+/* ==================== src/core/profiles/general.js ==================== */
+/*!
+ * 微信求职信息提取器 — 通用画像 (profiles/general.js)
+ * 两类信号都不强时使用：尽量把「时间 / 机构 / 联系方式 / 事件」这些通用要素捞出来，
+ * 不强行套招聘或文献的字段。
+ */
+(function (root, factory) {
+  var api = factory(
+    (typeof module !== 'undefined' && module.exports)
+      ? { rules: require('../rules.js') }
+      : { rules: root && root.WJE && root.WJE.rules }
+  );
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  if (root) {
+    root.WJE = root.WJE || {};
+    root.WJE.profiles = root.WJE.profiles || {};
+    root.WJE.profiles.general = api;
+  }
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (deps) {
+  'use strict';
+
+  var rules = deps.rules;
+
+  var EVENT_KEYWORDS = [
+    '会议', '论坛', '峰会', '讲座', '报告会', '研讨会', '沙龙', '培训', 'workshop', 'Workshop',
+    '征稿', '通知', '公告', '公示', '评选', '申报', '报名', '启动', '发布', '上线', '开放',
+    '政策', '解读', '指南', '清单', '汇总', '盘点', '数据', '报告'
+  ];
+
+  var ORG_LABELS = ['主办单位', '承办单位', '协办单位', '主办', '承办', '发布单位', '来源', '机构', '单位'];
+
+  function extractEvents(text, title) {
+    var hay = (title || '') + '\n' + (text || '').slice(0, 1500);
+    var hits = [];
+    for (var i = 0; i < EVENT_KEYWORDS.length; i++) {
+      var kw = EVENT_KEYWORDS[i];
+      if (hay.indexOf(kw) !== -1) hits.push(kw);
+    }
+    if (!hits.length) return null;
+    // 取标题里命中的优先
+    var inTitle = hits.filter(function (k) { return (title || '').indexOf(k) !== -1; });
+    return {
+      list: rules.uniq(inTitle.concat(hits)).slice(0, 8),
+      fromTitle: inTitle.length > 0
+    };
+  }
+
+  function extractOrganizer(text) {
+    for (var i = 0; i < ORG_LABELS.length; i++) {
+      var re = new RegExp('(?:^|[\\n。；;])\\s*' + ORG_LABELS[i] + '\\s*[:：]\\s*([^\\n]{2,60})');
+      var m = text.match(re);
+      if (m) {
+        var v = m[1].trim().replace(/[。；;，,]\s*$/, '');
+        if (v.length >= 2) return { value: v, from: ORG_LABELS[i] };
+      }
+    }
+    return null;
+  }
+
+  function extract(raw, options) {
+    options = options || {};
+    var text = raw.contentText || '';
+    var title = raw.title || '';
+
+    var dates = rules.findAllDates(text);
+    var contacts = rules.extractContacts(text);
+    var events = extractEvents(text, title);
+    var organizer = extractOrganizer(text);
+
+    // 通用画像下也给出一个"疑似主体"，便于归档命名
+    var cands = rules.findOrgCandidates([title, text.slice(0, 1200)].filter(Boolean).join('\n'));
+    var org = cands.length
+      ? { value: cands[0].name, confidence: 'low', evidence: '正文候选（未做招聘模板校验）', from: 'body' }
       : null;
+
+    var fields = {
+      org: org,
+      batch: null, recruitType: null, deadline: null, education: null, majors: null,
+      positions: null, locations: null, headcount: null,
+      contacts: contacts,
+      paper: null,
+      timeline: dates.slice(0, 12).map(function (d) { return { value: d.value, raw: d.raw }; }),
+      events: events,
+      organizer: organizer
+    };
+
+    var warnings = [];
+    if (!events && !dates.length && !contacts) {
+      warnings.push('这是一篇通用推送：未识别到招聘或文献特征，也没抓到明确的时间/联系方式，建议人工阅读。');
+    }
+
+    return { fields: fields, warnings: warnings };
+  }
+
+  return { extract: extract, extractEvents: extractEvents, extractOrganizer: extractOrganizer };
+});
+
+/* ==================== src/core/fields.js ==================== */
+/*!
+ * 微信求职信息提取器 — 编排层 (fields.js)
+ *
+ * 流程：
+ *   原始素材 → 内容类型判别(classify) → 按画像跑提取器(profiles/*) → 链接归集打分(links) → 汇总
+ *
+ * 支持的画像：recruit（招聘）/ literature（文献）/ general（通用）/ hybrid（两者都跑）
+ * 自动判断，也允许调用方用 options.forceProfile 手动指定（面板上的切换开关）。
+ */
+(function (root, factory) {
+  var api = factory(
+    (typeof module !== 'undefined' && module.exports)
+      ? {
+        rules: require('./rules.js'),
+        classify: require('./classify.js'),
+        links: require('./links.js'),
+        insights: require('./insights.js'),
+        recruit: require('./profiles/recruit.js'),
+        literature: require('./profiles/literature.js'),
+        general: require('./profiles/general.js')
+      }
+      : {
+        rules: root && root.WJE && root.WJE.rules,
+        classify: root && root.WJE && root.WJE.classify,
+        links: root && root.WJE && root.WJE.links,
+        insights: root && root.WJE && root.WJE.insights,
+        recruit: root && root.WJE && root.WJE.profiles && root.WJE.profiles.recruit,
+        literature: root && root.WJE && root.WJE.profiles && root.WJE.profiles.literature,
+        general: root && root.WJE && root.WJE.profiles && root.WJE.profiles.general
+      }
+  );
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  if (root) { root.WJE = root.WJE || {}; root.WJE.fields = api; }
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (deps) {
+  'use strict';
+
+  var rules = deps.rules;
+  var classify = deps.classify;
+  var links = deps.links;
+  var insights = deps.insights;
+
+  var ARTICLE_KIND_IMAGE = 'image';
+  var ARTICLE_KIND_TEXT = 'text';
+  var ARTICLE_KIND_MIXED = 'mixed';
+
+  var VALID_PROFILES = { recruit: 1, literature: 1, general: 1, hybrid: 1 };
+
+  /* ---------------------- 链接：多画像合并 ---------------------- */
+
+  function urlKey(u) { return String(u || '').replace(/[#?].*$/, '').replace(/\/$/, '').toLowerCase(); }
+
+  function mergeLinkSets(a, b) {
+    var byKey = Object.create(null);
+    [a, b].forEach(function (set) {
+      if (!set) return;
+      set.all.forEach(function (item) {
+        var k = urlKey(item.url);
+        var ex = byKey[k];
+        if (!ex) {
+          byKey[k] = {
+            url: item.url, originalUrl: item.originalUrl, host: item.host, text: item.text,
+            near: item.near, kind: item.kind, score: item.score,
+            reasons: item.reasons.slice(), sources: item.sources.slice()
+          };
+          return;
+        }
+        ex.reasons = rules.uniq(ex.reasons.concat(item.reasons));
+        ex.sources = rules.uniq(ex.sources.concat(item.sources));
+        if (item.score > ex.score) { ex.score = item.score; ex.kind = item.kind; }
+      });
+    });
+    var all = Object.keys(byKey).map(function (k) { return byKey[k]; })
+      .sort(function (x, y) { return y.score - x.score; });
+
+    var primKeys = Object.create(null);
+    [a, b].forEach(function (set) {
+      if (!set) return;
+      set.primary.forEach(function (i) { primKeys[urlKey(i.url)] = 1; });
+    });
+    var primary = all.filter(function (i) { return primKeys[urlKey(i.url)]; });
+
+    var groups = { doi: [], preprint: [], publisher: [], database: [], pdf: [] };
+    all.forEach(function (i) { if (groups[i.kind]) groups[i.kind].push(i); });
+
+    return { all: all, primary: primary, apply: primary, best: primary[0] || null, groups: groups, profile: 'hybrid' };
+  }
+
+  function rankLinks(raw, profile) {
+    var result;
+    if (profile === 'hybrid') {
+      result = mergeLinkSets(links.classifyAndRank(raw, 'recruit'), links.classifyAndRank(raw, 'literature'));
+    } else {
+      var p = (profile === 'literature' || profile === 'recruit') ? profile : 'general';
+      result = links.classifyAndRank(raw, p);
+    }
+    // 「阅读原文」是最关键的一条跳转，显式保留在结果里（合并路径也要带上）
+    result.readOriginal = (raw.readOriginal && raw.readOriginal.url)
+      ? {
+        url: rules.unwrapUrl(raw.readOriginal.url),
+        from: raw.readOriginal.from,
+        text: raw.readOriginal.text || '阅读原文'
+      }
+      : null;
+    return result;
+  }
+
+  /* ---------------------- 文章形态 ---------------------- */
+
+  function detectArticleKind(text, imageCount) {
+    var textLength = (text || '').replace(/\s/g, '').length;
+    if (textLength < 120 && imageCount >= 3) return ARTICLE_KIND_IMAGE;
+    if (textLength < 500 && imageCount >= 6) return ARTICLE_KIND_MIXED;
+    return ARTICLE_KIND_TEXT;
+  }
+
+  function emptyFields() {
+    return {
+      org: null, batch: null, recruitType: null, deadline: null, education: null,
+      majors: null, positions: null, locations: null, headcount: null, contacts: null,
+      paper: null, timeline: null, events: null, organizer: null
+    };
+  }
+
+  /* ---------------------- 主入口 ---------------------- */
+
+  function extractFields(raw, options) {
+    options = options || {};
+    var text = raw.contentText || '';
+    var title = raw.title || '';
+    var imageCount = (raw.images || []).length;
+    var textLength = text.replace(/\s/g, '').length;
+    var kind = detectArticleKind(text, imageCount);
+
+    // 1) 判别内容类型
+    var detection = classify.detect(raw);
+    var profile = detection.type;
+    var overridden = false;
+    if (options.forceProfile && VALID_PROFILES[options.forceProfile]) {
+      overridden = options.forceProfile !== profile;
+      profile = options.forceProfile;
+    }
+
+    // 2) 跑对应画像
+    var runners = [];
+    if (profile === 'recruit' || profile === 'hybrid') runners.push(deps.recruit);
+    if (profile === 'literature' || profile === 'hybrid') runners.push(deps.literature);
+    if (profile === 'general') runners.push(deps.general);
+
+    var fields = emptyFields();
     var warnings = (raw.warnings || []).slice();
 
+    runners.forEach(function (mod) {
+      var r = mod.extract(raw, options);
+      Object.keys(r.fields || {}).forEach(function (k) {
+        if (r.fields[k] !== null && r.fields[k] !== undefined) fields[k] = r.fields[k];
+      });
+      if (r.warnings) warnings = warnings.concat(r.warnings);
+    });
+
+    // 3) 链接归集（文献画像下的期刊/DOI 加成需要它在前面完成）
+    var ranked = rankLinks(raw, profile);
+
+    if (fields.paper) {
+      var urls = ranked.all.map(function (i) { return i.url; });
+      fields.paper.openAccess = deps.literature.detectOpenAccess(urls, fields.paper.journal);
+    }
+
+    // 4) 通用告警
     if (kind === ARTICLE_KIND_IMAGE) {
-      warnings.push('正文以图片为主（文字仅 ' + textLength + ' 字，图片 ' + imageCount + ' 张）：投递链接与截止时间很可能只印在长图里，插件无法读取图片文字，请打开原图人工确认或使用带 OCR 的流程。');
+      warnings.push('正文以图片为主（文字仅 ' + textLength + ' 字，图片 ' + imageCount +
+        ' 张）：关键信息很可能只印在长图里，插件无法读取图片文字，请打开原图人工确认。');
     } else if (kind === ARTICLE_KIND_MIXED) {
       warnings.push('正文文字偏少而图片较多（文字 ' + textLength + ' 字 / 图片 ' + imageCount + ' 张），部分关键信息可能只在图片中。');
     }
-    if (!links.best) warnings.push('未识别出明确的投递入口链接，可能是图片型推文或使用了二维码投递。');
-    if (fields.org && fields.org.confidence === 'low') warnings.push('招聘主体为推测结果，请人工确认。');
+    if (!ranked.best) {
+      warnings.push(profile === 'literature'
+        ? '未识别出明确的原文链接，可能是图片型推文或只给了 DOI 文本。'
+        : '未识别出明确的关键链接，可能是图片型推文或使用了二维码。');
+    }
+    if (overridden) {
+      warnings.push('内容类型由你手动指定为「' + classify.label(profile) + '」，自动判别结果是「' + classify.label(detection.type) + '」。');
+    }
 
-    var result = {
-      version: '1.0.0',
+    return {
+      version: '2.0.0',
       extractedAt: new Date().toISOString(),
+      detection: {
+        type: detection.type,
+        activeProfile: profile,
+        label: classify.label(profile),
+        autoLabel: classify.label(detection.type),
+        confidence: detection.confidence,
+        scores: detection.scores,
+        evidence: detection.evidence,
+        hints: detection.hints,
+        overridden: overridden
+      },
       meta: {
         title: title,
         account: raw.account || '',
@@ -1443,37 +2874,27 @@
         imageCount: imageCount,
         anchorsCount: (raw.anchors || []).length
       },
-      summary: buildSummary(fields, links),
+      summary: insights.buildSummary(profile, fields, ranked),
       fields: fields,
-      links: links,
-      keySentences: findKeySentences(text, options.keySentenceLimit || 12),
+      links: ranked,
+      keySentences: insights.findKeySentences(text, options.keySentenceLimit || 12, profile),
       images: (raw.images || []).slice(0, 40),
       warnings: rules.uniq(warnings)
     };
-    return result;
-  }
-
-  function guessYear(publishTime) {
-    var m = String(publishTime || '').match(/(20\d{2})/);
-    return m ? +m[1] : null;
-  }
-
-  function buildSummary(fields, links) {
-    var parts = [];
-    if (fields.org) parts.push(fields.org.value);
-    if (fields.batch) parts.push(fields.batch.value);
-    if (fields.recruitType) parts.push(fields.recruitType.value);
-    var line = parts.join(' · ');
-    if (fields.deadline) line += ' ｜ 截止 ' + fields.deadline.value;
-    if (links.best) line += ' ｜ 投递入口 ' + links.best.host;
-    return line;
   }
 
   return {
     extractFields: extractFields,
-    pickOrg: pickOrg,
-    classifyAndRank: classifyAndRank,
-    findKeySentences: findKeySentences,
+    emptyFields: emptyFields,
+    detectArticleKind: detectArticleKind,
+    rankLinks: rankLinks,
+    mergeLinkSets: mergeLinkSets,
+
+    // 向后兼容的薄封装
+    pickOrg: function (raw) { return deps.recruit.pickOrg(raw); },
+    classifyAndRank: function (raw, profile) { return links.classifyAndRank(raw, profile || 'recruit'); },
+    findKeySentences: function (text, limit, profile) { return insights.findKeySentences(text, limit, profile || 'recruit'); },
+
     ARTICLE_KIND_IMAGE: ARTICLE_KIND_IMAGE,
     ARTICLE_KIND_TEXT: ARTICLE_KIND_TEXT,
     ARTICLE_KIND_MIXED: ARTICLE_KIND_MIXED
@@ -1483,7 +2904,8 @@
 /* ==================== src/core/format.js ==================== */
 /*!
  * 微信求职信息提取器 — 输出格式化 (format.js)
- * 支持 Markdown / JSON / CSV / 纯链接列表 / 剪贴板文本。
+ * 支持 Markdown / JSON / CSV / 纯链接列表 / 一键引用格式。
+ * 输出按画像分流：招聘 → 投递入口表；文献 → 论文信息表 + 原文链接 + 引用格式。
  */
 (function (root, factory) {
   var api = factory();
@@ -1506,58 +2928,99 @@
     return { high: '', medium: '（待确认）', low: '（推测）' }[f.confidence] || '';
   }
 
+  function profileOf(res) {
+    return (res.detection && res.detection.activeProfile) || 'recruit';
+  }
+
+  function isLiterature(res) {
+    var p = profileOf(res);
+    return p === 'literature' || (p === 'hybrid' && res.fields && res.fields.paper && res.fields.paper.title);
+  }
+  function isRecruit(res) {
+    var p = profileOf(res);
+    return p === 'recruit' || p === 'hybrid';
+  }
+
+  function mdCell(v) {
+    return String(v === undefined || v === null ? '' : v).replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  }
+
+  function pushRow(lines, k, v) {
+    if (v === undefined || v === null || v === '') return;
+    lines.push('| ' + k + ' | ' + mdCell(v) + ' |');
+  }
+
   /* ---------------------------- Markdown ---------------------------- */
 
   function toMarkdown(res, opts) {
     opts = opts || {};
     var lines = [];
+    var lit = isLiterature(res);
+
     lines.push('# ' + (res.meta.title || '(无标题)'));
     lines.push('');
+
+    // 类型徽标
+    if (res.detection) {
+      var conf = { high: '高', medium: '中', low: '低' }[res.detection.confidence] || res.detection.confidence;
+      lines.push('> 识别类型：**' + res.detection.label + '**（置信度 ' + conf +
+        '；招聘信号 ' + res.detection.scores.recruit + ' / 文献信号 ' + res.detection.scores.literature + '）');
+      lines.push('');
+    }
+
     lines.push('| 字段 | 内容 |');
     lines.push('| --- | --- |');
-    var rows = [
-      ['公众号', res.meta.account],
-      ['发布时间', res.meta.publishTime],
-      ['原文链接', res.meta.url],
-      ['招聘主体', fieldValue(res, 'org') + confidenceTag(res.fields.org)],
-      ['招聘批次', fieldValue(res, 'batch')],
-      ['招聘类型', fieldValue(res, 'recruitType')],
-      ['投递截止', fieldValue(res, 'deadline') + (res.fields.deadline && res.fields.deadline.raw ? '（原文：' + res.fields.deadline.raw + '）' : '')],
-      ['学历要求', fieldValue(res, 'education')],
-      ['工作地点', res.fields.locations ? (res.fields.locations.list.join('、') + (res.fields.locations.nationwide ? '（含全国）' : '')) : ''],
-      ['招聘岗位', fieldValue(res, 'positions')],
-      ['需求专业', fieldValue(res, 'majors')],
-      ['招聘人数', res.fields.headcount ? String(res.fields.headcount.value) : ''],
-      ['联系方式', res.fields.contacts ? [].concat(res.fields.contacts.emails || [], res.fields.contacts.phones || []).join(' / ') : '']
-    ];
-    rows.forEach(function (r) {
-      if (r[1] === undefined || r[1] === null || r[1] === '') return;
-      lines.push('| ' + r[0] + ' | ' + String(r[1]).replace(/\|/g, '\\|').replace(/\n/g, ' ') + ' |');
-    });
+    pushRow(lines, '公众号', res.meta.account);
+    pushRow(lines, '发布时间', res.meta.publishTime);
+    pushRow(lines, '原文链接', res.meta.url);
+
+    if (lit) renderLiteratureRows(lines, res);
+    if (isRecruit(res)) renderRecruitRows(lines, res);
+    if (profileOf(res) === 'general') renderGeneralRows(lines, res);
+
     lines.push('');
 
-    lines.push('## 投递入口');
-    if (res.links.apply.length) {
-      res.links.apply.forEach(function (l, i) {
-        lines.push((i + 1) + '. [' + (l.text || l.host) + '](' + l.url + ')');
-        lines.push('   - 域名：`' + l.host + '`　类型：' + kindLabel(l.kind) + '　评分：' + l.score);
-        if (l.reasons && l.reasons.length && opts.verbose !== false) {
-          lines.push('   - 判定依据：' + l.reasons.join('；'));
-        }
-      });
+    // ---- 链接 ----
+    if (lit) {
+      lines.push('## 原文链接');
+      renderLinkList(lines, res, opts);
+      lines.push('');
+      var g = res.links.groups || {};
+      var extras = []
+        .concat(g.doi || [], g.preprint || [], g.publisher || [], g.database || [], g.pdf || [])
+        .filter(function (l) { return (res.links.primary || []).indexOf(l) === -1; });
+      if (extras.length) {
+        lines.push('### 其他学术链接');
+        dedupeLinks(extras).slice(0, 10).forEach(function (l) {
+          lines.push('- [' + (l.text || l.host) + '](' + l.url + ')　`' + l.host + '`');
+        });
+        lines.push('');
+      }
     } else {
-      lines.push('> 未识别到明确的投递入口。' + (res.meta.articleKind === 'image' ? '本篇为图片型推文，链接可能印在长图中。' : ''));
+      lines.push('## ' + (profileOf(res) === 'general' ? '主要链接' : '投递入口'));
+      renderLinkList(lines, res, opts);
+      lines.push('');
     }
-    lines.push('');
 
-    if (res.links.readOriginal) {
+    if (res.links && res.links.readOriginal) {
       lines.push('## 阅读原文跳转');
       lines.push('- ' + res.links.readOriginal.url + '　（来源：' + res.links.readOriginal.from + '）');
       lines.push('');
     }
 
-    var others = res.links.all.filter(function (l) {
-      return res.links.apply.indexOf(l) === -1 && !/read_original/.test(l.sources.join(',')) && l.kind !== 'wechat';
+    // ---- 文献专属：摘要 / 引用格式 ----
+    if (lit && res.fields.paper) renderLiteratureExtras(lines, res.fields.paper);
+
+    // ---- 通用画像：时间线 ----
+    if (profileOf(res) === 'general' && res.fields.timeline && res.fields.timeline.length) {
+      lines.push('## 文中日期');
+      res.fields.timeline.forEach(function (d) { lines.push('- ' + d.value + '（' + d.raw + '）'); });
+      lines.push('');
+    }
+
+    // ---- 其他链接 ----
+    var others = (res.links.all || []).filter(function (l) {
+      return (res.links.primary || []).indexOf(l) === -1 && !/read_original/.test((l.sources || []).join(',')) && l.kind !== 'wechat';
     }).slice(0, 10);
     if (others.length) {
       lines.push('## 其他链接');
@@ -1565,21 +3028,127 @@
       lines.push('');
     }
 
-    if (res.keySentences.length && opts.verbose !== false) {
+    if (res.keySentences && res.keySentences.length && opts.verbose !== false) {
       lines.push('## 关键句摘录');
       res.keySentences.forEach(function (s) { lines.push('> ' + s); });
       lines.push('');
     }
 
-    if (res.warnings.length) {
+    if (res.warnings && res.warnings.length) {
       lines.push('## 提示');
       res.warnings.forEach(function (w) { lines.push('- ⚠️ ' + w); });
       lines.push('');
     }
 
     lines.push('---');
-    lines.push('_由「微信求职信息提取器」于 ' + res.extractedAt + ' 生成，字段为机器抽取结果，投递前请以官方原文为准。_');
+    lines.push('_由「微信求职信息提取器」v' + (res.version || '2.0.0') + ' 于 ' + res.extractedAt +
+      ' 生成，字段为机器抽取结果，请以原文为准。_');
     return lines.join('\n');
+  }
+
+  function renderLinkList(lines, res, opts) {
+    var primary = res.links.primary || res.links.apply || [];
+    if (!primary.length) {
+      lines.push('> 未识别到明确链接。' + (res.meta.articleKind === 'image' ? '本篇为图片型推文，链接可能印在长图中。' : ''));
+      return;
+    }
+    primary.forEach(function (l, i) {
+      lines.push((i + 1) + '. [' + (l.text || l.host) + '](' + l.url + ')');
+      lines.push('   - 域名：`' + l.host + '`　类型：' + kindLabel(l.kind) + '　评分：' + l.score);
+      if (opts.verbose !== false && l.reasons && l.reasons.length) lines.push('   - 判定依据：' + l.reasons.join('；'));
+    });
+  }
+
+  function dedupeLinks(list) {
+    var seen = Object.create(null), out = [];
+    list.forEach(function (l) {
+      var k = String(l.url).replace(/[#?].*$/, '').toLowerCase();
+      if (!seen[k]) { seen[k] = 1; out.push(l); }
+    });
+    return out;
+  }
+
+  function renderLiteratureRows(lines, res) {
+    var p = res.fields.paper || {};
+    pushRow(lines, '论文标题', p.title);
+    if (p.titleZh && p.titleEn && p.titleZh !== p.titleEn) pushRow(lines, '英文标题', p.titleEn);
+    if (p.authors && p.authors.length) pushRow(lines, '作者', p.authors.join(', '));
+    if (p.firstAuthor && p.firstAuthor.length) pushRow(lines, '第一作者', p.firstAuthor.join(', '));
+    if (p.correspondingAuthor && p.correspondingAuthor.length) pushRow(lines, '通讯作者', p.correspondingAuthor.join(', '));
+    pushRow(lines, '期刊', p.journal);
+    var num = [];
+    if (p.year) num.push(p.year + ' 年');
+    if (p.volume) num.push('第 ' + p.volume + ' 卷');
+    if (p.issue) num.push('第 ' + p.issue + ' 期');
+    if (p.pages) num.push('页 ' + p.pages);
+    if (p.articleNumber) num.push('文章号 ' + p.articleNumber);
+    if (num.length) pushRow(lines, '卷期页', num.join('，'));
+    pushRow(lines, 'DOI', p.doi);
+    pushRow(lines, 'arXiv', p.arxiv);
+    pushRow(lines, 'PMID', p.pmid);
+    pushRow(lines, '影响因子', p.impactFactor);
+    pushRow(lines, '分区', [p.jcr, p.cas].filter(Boolean).join(' / '));
+    pushRow(lines, '被引', p.citations);
+    pushRow(lines, '文献类型', p.paperType);
+    pushRow(lines, '开放获取', p.openAccess ? '是' : '');
+    if (p.keywordsZh && p.keywordsZh.length) pushRow(lines, '关键词', p.keywordsZh.join('、'));
+    if (p.keywordsEn && p.keywordsEn.length) pushRow(lines, 'Keywords', p.keywordsEn.join(', '));
+  }
+
+  function renderRecruitRows(lines, res) {
+    var f = res.fields;
+    pushRow(lines, '招聘主体', fieldValue(res, 'org') + confidenceTag(f.org));
+    if (f.org && f.org.aliases && f.org.aliases.length) pushRow(lines, '全称', f.org.aliases.join('、'));
+    pushRow(lines, '招聘批次', fieldValue(res, 'batch'));
+    pushRow(lines, '招聘类型', fieldValue(res, 'recruitType'));
+    pushRow(lines, '投递截止', fieldValue(res, 'deadline') +
+      (f.deadline && f.deadline.raw ? '（原文：' + f.deadline.raw + '）' : ''));
+    pushRow(lines, '学历要求', fieldValue(res, 'education'));
+    pushRow(lines, '工作地点', f.locations ? (f.locations.list.join('、') + (f.locations.nationwide ? '（含全国）' : '')) : '');
+    pushRow(lines, '招聘岗位', fieldValue(res, 'positions'));
+    pushRow(lines, '需求专业', fieldValue(res, 'majors'));
+    pushRow(lines, '招聘人数', f.headcount ? String(f.headcount.value) : '');
+    pushRow(lines, '联系方式', f.contacts ? [].concat(f.contacts.emails || [], f.contacts.phones || []).join(' / ') : '');
+  }
+
+  function renderGeneralRows(lines, res) {
+    var f = res.fields;
+    pushRow(lines, '疑似主体', fieldValue(res, 'org'));
+    pushRow(lines, '主办/来源', f.organizer ? f.organizer.value : '');
+    pushRow(lines, '事件类型', f.events ? f.events.list.join('、') : '');
+    pushRow(lines, '联系方式', f.contacts ? [].concat(f.contacts.emails || [], f.contacts.phones || []).join(' / ') : '');
+  }
+
+  function renderLiteratureExtras(lines, p) {
+    if (p.abstractZh) {
+      lines.push('## 中文摘要');
+      lines.push('> ' + p.abstractZh.replace(/\n+/g, '\n> '));
+      lines.push('');
+    }
+    if (p.abstractEn) {
+      lines.push('## Abstract');
+      lines.push('> ' + p.abstractEn.replace(/\n+/g, '\n> '));
+      lines.push('');
+    }
+    if (p.citations) {
+      lines.push('## 引用格式');
+      lines.push('');
+      lines.push('**GB/T 7714**');
+      lines.push('```');
+      lines.push(p.citations.gbt7714 || '');
+      lines.push('```');
+      lines.push('**APA 7th**');
+      lines.push('```');
+      lines.push(p.citations.apa || '');
+      lines.push('```');
+      if (p.citations.bibtex) {
+        lines.push('**BibTeX**');
+        lines.push('```bibtex');
+        lines.push(p.citations.bibtex);
+        lines.push('```');
+      }
+      lines.push('');
+    }
   }
 
   function kindLabel(kind) {
@@ -1589,7 +3158,12 @@
       redirect: '跳转中间页',
       wechat: '微信站内',
       other: '其他',
-      invalid: '无效'
+      invalid: '无效',
+      doi: 'DOI 解析页',
+      preprint: '预印本',
+      publisher: '出版社官网',
+      database: '文献数据库',
+      pdf: 'PDF 全文'
     }[kind] || kind;
   }
 
@@ -1602,10 +3176,12 @@
   /* ------------------------------ CSV ------------------------------- */
 
   var CSV_COLUMNS = [
+    ['type', function (r) { return r.detection ? r.detection.label : ''; }],
     ['title', function (r) { return r.meta.title; }],
     ['account', function (r) { return r.meta.account; }],
     ['publishTime', function (r) { return r.meta.publishTime; }],
     ['url', function (r) { return r.meta.url; }],
+    // 招聘
     ['org', function (r) { return fieldValue(r, 'org'); }],
     ['batch', function (r) { return fieldValue(r, 'batch'); }],
     ['recruitType', function (r) { return fieldValue(r, 'recruitType'); }],
@@ -1616,9 +3192,35 @@
     ['majors', function (r) { return fieldValue(r, 'majors'); }],
     ['headcount', function (r) { return r.fields.headcount ? String(r.fields.headcount.value) : ''; }],
     ['contacts', function (r) { return r.fields.contacts ? [].concat(r.fields.contacts.emails || [], r.fields.contacts.phones || []).join(' / ') : ''; }],
-    ['applyLink', function (r) { return r.links.best ? r.links.best.url : ''; }],
-    ['allApplyLinks', function (r) { return r.links.apply.map(function (l) { return l.url; }).join(' | '); }],
+    // 文献
+    ['paperTitle', function (r) { return r.fields.paper ? r.fields.paper.title : ''; }],
+    ['paperTitleEn', function (r) { return r.fields.paper ? r.fields.paper.titleEn : ''; }],
+    ['authors', function (r) { return r.fields.paper && r.fields.paper.authors ? r.fields.paper.authors.join('; ') : ''; }],
+    ['firstAuthor', function (r) { return r.fields.paper && r.fields.paper.firstAuthor ? r.fields.paper.firstAuthor.join('; ') : ''; }],
+    ['correspondingAuthor', function (r) { return r.fields.paper && r.fields.paper.correspondingAuthor ? r.fields.paper.correspondingAuthor.join('; ') : ''; }],
+    ['journal', function (r) { return r.fields.paper ? r.fields.paper.journal : ''; }],
+    ['year', function (r) { return r.fields.paper && r.fields.paper.year ? String(r.fields.paper.year) : ''; }],
+    ['volume', function (r) { return r.fields.paper ? r.fields.paper.volume : ''; }],
+    ['issue', function (r) { return r.fields.paper ? r.fields.paper.issue : ''; }],
+    ['pages', function (r) { return r.fields.paper ? r.fields.paper.pages : ''; }],
+    ['doi', function (r) { return r.fields.paper ? r.fields.paper.doi : ''; }],
+    ['arxiv', function (r) { return r.fields.paper ? r.fields.paper.arxiv : ''; }],
+    ['pmid', function (r) { return r.fields.paper ? r.fields.paper.pmid : ''; }],
+    ['impactFactor', function (r) { return r.fields.paper ? r.fields.paper.impactFactor : ''; }],
+    ['quartile', function (r) {
+      var p = r.fields.paper;
+      return p ? [p.jcr, p.cas].filter(Boolean).join(' / ') : '';
+    }],
+    ['keywords', function (r) {
+      var p = r.fields.paper;
+      return p ? [].concat(p.keywordsZh || [], p.keywordsEn || []).join('; ') : '';
+    }],
+    // 链接
+    ['primaryLink', function (r) { return r.links.best ? r.links.best.url : ''; }],
+    ['allPrimaryLinks', function (r) { return (r.links.primary || []).map(function (l) { return l.url; }).join(' | '); }],
     ['readOriginal', function (r) { return r.links.readOriginal ? r.links.readOriginal.url : ''; }],
+    ['citationGBT', function (r) { return r.fields.paper && r.fields.paper.citations ? r.fields.paper.citations.gbt7714 : ''; }],
+    ['citationAPA', function (r) { return r.fields.paper && r.fields.paper.citations ? r.fields.paper.citations.apa : ''; }],
     ['articleKind', function (r) { return r.meta.articleKind; }],
     ['warnings', function (r) { return r.warnings.join(' | '); }]
   ];
@@ -1644,19 +3246,69 @@
     if (!Array.isArray(res)) res = [res];
     var urls = [];
     res.forEach(function (r) {
-      var pool = mode === 'all' ? r.links.apply.concat(r.links.readOriginal ? [{ url: r.links.readOriginal.url }] : []) : r.links.apply;
+      var primary = r.links.primary || r.links.apply || [];
+      var pool = mode === 'all'
+        ? primary.concat(r.links.readOriginal ? [{ url: r.links.readOriginal.url }] : [])
+        : primary;
       pool.forEach(function (l) { if (l && l.url && urls.indexOf(l.url) === -1) urls.push(l.url); });
     });
     return urls.join('\n');
+  }
+
+  /* --------------------------- 引用格式 ----------------------------- */
+
+  /** 只复制引用格式，供文献笔记场景使用。 */
+  function toCitation(res, style) {
+    var p = res.fields && res.fields.paper;
+    if (!p || !p.citations) return '';
+    style = (style || 'gbt7714').toLowerCase();
+    if (style === 'apa') return p.citations.apa || '';
+    if (style === 'bibtex') return p.citations.bibtex || '';
+    if (style === 'oneline') return p.citations.oneline || '';
+    return p.citations.gbt7714 || '';
+  }
+
+  /** 复制论文题录（标题/作者/期刊/DOI 一行一条）。 */
+  function toPaperCard(res) {
+    var p = res.fields && res.fields.paper;
+    if (!p) return '';
+    var lines = [];
+    if (p.title) lines.push('标题：' + p.title);
+    if (p.titleEn && p.titleEn !== p.title) lines.push('英文标题：' + p.titleEn);
+    if (p.authors && p.authors.length) lines.push('作者：' + p.authors.join(', '));
+    if (p.correspondingAuthor && p.correspondingAuthor.length) lines.push('通讯作者：' + p.correspondingAuthor.join(', '));
+    if (p.journal) lines.push('期刊：' + p.journal);
+    var loc = [];
+    if (p.year) loc.push(p.year);
+    if (p.volume) loc.push('vol. ' + p.volume);
+    if (p.issue) loc.push('no. ' + p.issue);
+    if (p.pages) loc.push('pp. ' + p.pages);
+    if (loc.length) lines.push('出处：' + loc.join(', '));
+    if (p.doi) lines.push('DOI：' + p.doi);
+    if (p.arxiv) lines.push('arXiv：' + p.arxiv);
+    if (p.pmid) lines.push('PMID：' + p.pmid);
+    if (p.impactFactor) lines.push('影响因子：' + p.impactFactor);
+    if (p.jcr || p.cas) lines.push('分区：' + [p.jcr, p.cas].filter(Boolean).join(' / '));
+    if (res.links.best) lines.push('原文链接：' + res.links.best.url);
+    return lines.join('\n');
   }
 
   /* --------------------------- 一行速览 ----------------------------- */
 
   function toOneLiner(res) {
     var bits = [];
-    if (res.fields.org) bits.push(res.fields.org.value);
-    if (res.fields.batch) bits.push(res.fields.batch.value);
-    if (res.fields.deadline) bits.push('截止' + res.fields.deadline.value);
+    var p = res.fields && res.fields.paper;
+    if (isLiterature(res) && p) {
+      if (p.title) bits.push(p.title);
+      if (p.authors && p.authors.length) bits.push(p.authors.slice(0, 2).join(', '));
+      if (p.journal) bits.push(p.journal);
+      if (p.year) bits.push(String(p.year));
+      if (p.doi) bits.push(p.doi);
+    } else {
+      if (res.fields.org) bits.push(res.fields.org.value);
+      if (res.fields.batch) bits.push(res.fields.batch.value);
+      if (res.fields.deadline) bits.push('截止' + res.fields.deadline.value);
+    }
     if (res.links.best) bits.push(res.links.best.url);
     return bits.join(' | ');
   }
@@ -1666,9 +3318,14 @@
     toJSON: toJSON,
     toCSV: toCSV,
     toLinkList: toLinkList,
+    toCitation: toCitation,
+    toPaperCard: toPaperCard,
     toOneLiner: toOneLiner,
     fieldValue: fieldValue,
     kindLabel: kindLabel,
+    profileOf: profileOf,
+    isLiterature: isLiterature,
+    isRecruit: isRecruit,
     CSV_COLUMNS: CSV_COLUMNS
   };
 });
@@ -1677,9 +3334,10 @@
 /*!
  * 微信求职信息提取器 — 统一入口 (extract.js)
  *
- *   WJE.extract.fromDocument(document)   → 结构化结果（内容脚本）
- *   WJE.extract.fromHtml(htmlString)     → 结构化结果（批量抓取 / 离线）
- *   WJE.extract.pipeline(source, opts)   → 通用入口
+ *   WJE.extract.fromDocument(document)              → 结构化结果（内容脚本）
+ *   WJE.extract.fromHtml(htmlString)                → 结构化结果（批量抓取 / 离线）
+ *   WJE.extract.pipeline(source, opts)              → 通用入口
+ *   WJE.extract.pipeline(src, {forceProfile:'literature'})  → 手动指定画像
  */
 (function (root, factory) {
   var api = factory(
@@ -1688,13 +3346,19 @@
         parse: require('./parse.js'),
         fields: require('./fields.js'),
         format: require('./format.js'),
-        rules: require('./rules.js')
+        rules: require('./rules.js'),
+        classify: require('./classify.js'),
+        links: require('./links.js'),
+        insights: require('./insights.js')
       }
       : {
         parse: root && root.WJE && root.WJE.parse,
         fields: root && root.WJE && root.WJE.fields,
         format: root && root.WJE && root.WJE.format,
-        rules: root && root.WJE && root.WJE.rules
+        rules: root && root.WJE && root.WJE.rules,
+        classify: root && root.WJE && root.WJE.classify,
+        links: root && root.WJE && root.WJE.links,
+        insights: root && root.WJE && root.WJE.insights
       }
   );
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
@@ -1702,7 +3366,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (deps) {
   'use strict';
 
-  var VERSION = '1.0.0';
+  var VERSION = '2.0.0';
 
   function pipeline(source, options) {
     options = options || {};
@@ -1724,7 +3388,10 @@
     format: deps.format,
     rules: deps.rules,
     parse: deps.parse,
-    fields: deps.fields
+    fields: deps.fields,
+    classify: deps.classify,
+    links: deps.links,
+    insights: deps.insights
   };
 });
 
@@ -1769,6 +3436,25 @@
     '  background: #e8f7ee; color: #05874a; }',
     '.chip.warn { background: #fff4e5; color: #b76b00; }',
     '.chip.info { background: #eef2ff; color: #3b5bdb; }',
+
+    '.pbar { display: flex; align-items: center; gap: 8px; margin-top: 9px; }',
+    '.badge { padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 700;',
+    '  background: #eef2ff; color: #3b5bdb; white-space: nowrap; }',
+    '.badge.recruit { background: #e8f7ee; color: #05874a; }',
+    '.badge.literature { background: #f3ecff; color: #6b3fd4; }',
+    '.badge.general { background: #f2f3f5; color: #6b7280; }',
+    '.badge.hybrid { background: #fff4e5; color: #b76b00; }',
+    '.psel { flex: 1; min-width: 0; padding: 3px 6px; border: 1px solid #d8dbe0; border-radius: 6px;',
+    '  font: inherit; font-size: 11.5px; color: #40454d; background: #fff; cursor: pointer; }',
+    '.psel:focus { outline: none; border-color: #07c160; }',
+
+    '.cite { margin: 0 0 8px; }',
+    '.cite .lbl { font-size: 11px; font-weight: 700; color: #5b6270; margin-bottom: 3px; }',
+    '.cite pre { margin: 0; padding: 8px 10px; background: #f7f8fa; border: 1px solid #eceef1;',
+    '  border-radius: 6px; font: 11.5px/1.6 ui-monospace, Consolas, monospace;',
+    '  white-space: pre-wrap; word-break: break-word; color: #24292f; }',
+    '.abs { font-size: 12px; color: #40454d; background: #f7f8fa; border-left: 3px solid #6b3fd4;',
+    '  border-radius: 0 6px 6px 0; padding: 8px 10px; margin: 0 0 8px; max-height: 220px; overflow-y: auto; }',
 
     '.bd { flex: 1 1 auto; overflow-y: auto; padding: 12px 16px 24px; }',
     '.bd::-webkit-scrollbar { width: 8px; }',
@@ -1833,11 +3519,21 @@
     var shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML =
       '<style>' + CSS + '</style>' +
-      '<button class="fab" part="fab" title="提取本页招聘关键信息（Alt+Shift+E）">🔍 提取招聘信息</button>' +
-      '<aside class="panel" role="dialog" aria-label="微信求职信息提取结果">' +
+      '<button class="fab" part="fab" title="提取本页关键信息（Alt+Shift+E）">🔍 提取关键信息</button>' +
+      '<aside class="panel" role="dialog" aria-label="微信推文关键信息提取结果">' +
       '  <div class="hd">' +
       '    <div class="hd-row"><h1 class="title">提取中…</h1><button class="x" title="关闭">×</button></div>' +
       '    <div class="meta"></div>' +
+      '    <div class="pbar">' +
+      '      <span class="badge" title="内容类型自动判别结果">…</span>' +
+      '      <select class="psel" title="手动切换提取画像">' +
+      '        <option value="">自动判别</option>' +
+      '        <option value="recruit">按招聘提取</option>' +
+      '        <option value="literature">按文献提取</option>' +
+      '        <option value="general">按通用提取</option>' +
+      '        <option value="hybrid">招聘 + 文献</option>' +
+      '      </select>' +
+      '    </div>' +
       '    <div class="chips"></div>' +
       '  </div>' +
       '  <div class="bd"></div>' +
@@ -1853,6 +3549,10 @@
     shadow.querySelector('.x').addEventListener('click', function () { hide(); });
     shadow.querySelector('.bd').addEventListener('click', onBodyClick);
     shadow.querySelector('.ft').addEventListener('click', onFooterClick);
+    shadow.querySelector('.psel').addEventListener('change', function (ev) {
+      state.forceProfile = ev.target.value || null;
+      extractAndShow();
+    });
   }
 
   function toast(msg) {
@@ -1901,6 +3601,7 @@
     var sh = state.shadow;
     var F = root.WJE.format;
     var f = result.fields;
+    var det = result.detection || { type: 'recruit', label: '招聘求职', confidence: 'medium' };
 
     sh.querySelector('.title').textContent = result.meta.title || '(未识别到标题)';
     sh.querySelector('.meta').textContent = [
@@ -1909,24 +3610,198 @@
       result.meta.articleKind === 'image' ? '图片型推文' : (result.meta.articleKind === 'mixed' ? '图文混合' : '文字型推文')
     ].filter(Boolean).join('　·　');
 
+    // 类型徽标 + 手动切换
+    var badge = sh.querySelector('.badge');
+    badge.className = 'badge ' + det.activeProfile;
+    var confZh = { high: '高', medium: '中', low: '低' }[det.confidence] || det.confidence;
+    badge.textContent = det.label + '（' + confZh + '）';
+    var s = det.scores || {};
+    badge.title = '自动判别：' + det.autoLabel + '\n招聘信号 ' + (s.recruit || 0) + '（基础 ' + (s.recruitBase || 0) + '）' +
+      '\n文献信号 ' + (s.literature || 0) + '（基础 ' + (s.literatureBase || 0) + ' + 硬凭据 ' + (s.literatureHard || 0) + '）' +
+      '\n' + (det.evidence || []).join('\n');
+    var psel = sh.querySelector('.psel');
+    psel.value = det.overridden ? det.activeProfile : '';
+
     var chips = [];
+    var html = [];
+
+    if (isLit(result)) renderLiterature(f, det, chips, html);
+    if (isRec(result)) renderRecruit(f, chips, html, result);
+    if (det.activeProfile === 'general') renderGeneral(f, chips, html);
+
+    // 阅读原文（与主链接重复时不重复展示）
+    var read = result.links.readOriginal;
+    var bestUrl = result.links.best ? result.links.best.url : '';
+    if (read && read.url && read.url !== bestUrl) {
+      html.push('<div class="sec"><h2>阅读原文跳转</h2>' +
+        '<div class="link"><a class="u" href="' + esc(read.url) + '" target="_blank" rel="noopener noreferrer">' +
+        esc(read.url) + '</a>' +
+        '<div class="r">来源：' + esc(read.from) + '</div>' +
+        '<div class="acts"><button class="b" data-act="copy-url" data-url="' + esc(read.url) + '">复制链接</button></div>' +
+        '</div></div>');
+    }
+
+    // 图片（图片型推文时最关键）
+    if (result.meta.articleKind !== 'text' && result.images.length) {
+      html.push('<div class="sec"><h2>正文图片（' + result.meta.imageCount + '）</h2><div class="imgs">' +
+        result.images.slice(0, 12).map(function (im) {
+          return '<img src="' + esc(im.src) + '" alt="' + esc(im.alt || '') + '" data-act="zoom" data-url="' + esc(im.src) + '" loading="lazy">';
+        }).join('') + '</div></div>');
+    }
+
+    // 告警
+    if (result.warnings.length) {
+      html.push('<div class="sec"><h2>提示</h2>' +
+        result.warnings.map(function (w) { return '<div class="warn">⚠️ ' + esc(w) + '</div>'; }).join('') + '</div>');
+    }
+
+    // 关键句
+    if (result.keySentences.length) {
+      html.push('<div class="sec"><h2>关键句摘录</h2>' +
+        result.keySentences.slice(0, 8).map(function (s2) { return '<p class="quote">' + esc(s2) + '</p>'; }).join('') + '</div>');
+    }
+
+    // 判定依据（可折叠）
+    if (det.evidence && det.evidence.length) {
+      html.push('<div class="sec"><h2>判定依据</h2><div class="r" style="font-size:11.5px;color:#8a9099;line-height:1.8">' +
+        det.evidence.map(function (e) { return '· ' + esc(e); }).join('<br>') + '</div></div>');
+    }
+
+    sh.querySelector('.chips').innerHTML = chips.join('');
+    sh.querySelector('.bd').innerHTML = html.join('');
+
+    // 底部按钮随画像变化
+    var ft = '<button class="b primary" data-act="copy-md">复制 Markdown</button>';
+    if (isLit(result)) {
+      ft += '<button class="b" data-act="copy-cite">复制 GB/T 引用</button>' +
+        '<button class="b" data-act="copy-apa">复制 APA</button>' +
+        '<button class="b" data-act="copy-bibtex">复制 BibTeX</button>' +
+        '<button class="b" data-act="copy-card">复制题录</button>' +
+        '<button class="b" data-act="copy-links">复制原文链接</button>';
+    } else {
+      ft += '<button class="b" data-act="copy-links">复制主要链接</button>';
+    }
+    ft += '<button class="b" data-act="copy-json">复制 JSON</button>' +
+      '<button class="b" data-act="dl-md">下载 .md</button>' +
+      '<button class="b" data-act="dl-json">下载 .json</button>' +
+      '<button class="b" data-act="highlight">高亮正文关键词</button>';
+    sh.querySelector('.ft').innerHTML = ft;
+  }
+
+  function isLit(res) {
+    var p = res.detection ? res.detection.activeProfile : 'recruit';
+    return (p === 'literature' || p === 'hybrid') && res.fields.paper && (res.fields.paper.title || res.fields.paper.doi);
+  }
+  function isRec(res) {
+    var p = res.detection ? res.detection.activeProfile : 'recruit';
+    return p === 'recruit' || p === 'hybrid';
+  }
+
+  /* ---------------------- 文献渲染 ---------------------- */
+
+  function renderLiterature(f, det, chips, html) {
+    var p = f.paper;
+    if (p.doi) chips.unshift('<span class="chip info">DOI ' + esc(p.doi) + '</span>');
+    if (p.journal) chips.push('<span class="chip">' + esc(p.journal) + (p.year ? ' ' + p.year : '') + '</span>');
+    if (p.authors && p.authors.length) chips.push('<span class="chip">' + esc(p.authors[0]) + (p.authors.length > 1 ? ' 等 ' + p.authors.length + ' 人' : '') + '</span>');
+    if (p.openAccess) chips.push('<span class="chip">开放获取</span>');
+
+    // 原文链接
+    html.push('<div class="sec"><h2>原文链接</h2>');
+    if (f && p && (p.doi || p.arxiv)) {
+      var ids = [];
+      if (p.doi) ids.push('<div class="link"><a class="u" href="https://doi.org/' + esc(p.doi) + '" target="_blank" rel="noopener noreferrer">https://doi.org/' + esc(p.doi) + '</a>' +
+        '<div class="r">DOI 解析页（点击直达出版社）</div>' +
+        '<div class="acts"><button class="b primary" data-act="open" data-url="https://doi.org/' + esc(p.doi) + '">打开</button>' +
+        '<button class="b" data-act="copy-url" data-url="https://doi.org/' + esc(p.doi) + '">复制</button></div></div>');
+      if (p.arxiv) ids.push('<div class="link"><a class="u" href="https://arxiv.org/abs/' + esc(p.arxiv) + '" target="_blank" rel="noopener noreferrer">https://arxiv.org/abs/' + esc(p.arxiv) + '</a>' +
+        '<div class="r">arXiv 预印本</div></div>');
+      html.push(ids.join(''));
+    }
+    var primary = (state.result.links.primary || []);
+    if (primary.length) {
+      primary.forEach(function (l, i) {
+        if (p && p.doi && l.url.indexOf('doi.org/' + p.doi) !== -1) return;   // 上面已渲染
+        html.push('<div class="link' + (i === 0 ? ' best' : '') + '">' +
+          '<a class="u" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer">' + esc(l.url) + '</a>' +
+          '<div class="r">' + esc(root.WJE.format.kindLabel(l.kind)) + '　评分 ' + l.score +
+          (l.reasons && l.reasons.length ? '　·　' + esc(l.reasons.slice(0, 2).join('；')) : '') + '</div>' +
+          '<div class="acts"><button class="b" data-act="open" data-url="' + esc(l.url) + '">打开</button>' +
+          '<button class="b" data-act="copy-url" data-url="' + esc(l.url) + '">复制链接</button></div></div>');
+      });
+    } else if (!p.doi && !p.arxiv) {
+      html.push('<div class="empty">未识别到原文链接。</div>');
+    }
+    html.push('</div>');
+
+    // 论文信息表
+    var rows = [];
+    var push = function (k, v) {
+      if (v === undefined || v === null || v === '') return;
+      rows.push('<tr><td class="k">' + k + '</td><td class="v">' + esc(v) + '</td></tr>');
+    };
+    push('标题', p.title);
+    if (p.titleEn && p.titleEn !== p.title) push('英文标题', p.titleEn);
+    if (p.authors && p.authors.length) push('作者', p.authors.join(', '));
+    if (p.firstAuthor && p.firstAuthor.length) push('第一作者', p.firstAuthor.join(', '));
+    if (p.correspondingAuthor && p.correspondingAuthor.length) push('通讯作者', p.correspondingAuthor.join(', '));
+    push('期刊', p.journal);
+    var loc = [];
+    if (p.year) loc.push(p.year + ' 年');
+    if (p.volume) loc.push('第 ' + p.volume + ' 卷');
+    if (p.issue) loc.push('第 ' + p.issue + ' 期');
+    if (p.pages) loc.push('页 ' + p.pages);
+    push('出处', loc.join('，'));
+    push('DOI', p.doi);
+    push('arXiv', p.arxiv);
+    push('PMID', p.pmid);
+    push('影响因子', p.impactFactor);
+    push('分区', [p.jcr, p.cas].filter(Boolean).join(' / '));
+    push('被引', p.citations);
+    push('文献类型', p.paperType);
+    push('关键词', (p.keywordsZh || []).join('、') || (p.keywordsEn || []).join(', '));
+    if (rows.length) html.push('<div class="sec"><h2>论文信息</h2><table class="kv">' + rows.join('') + '</table></div>');
+
+    // 摘要
+    if (p.abstractZh || p.abstractEn) {
+      html.push('<div class="sec"><h2>摘要</h2>');
+      if (p.abstractZh) html.push('<div class="abs">' + esc(p.abstractZh) + '</div>');
+      if (p.abstractEn) html.push('<div class="abs" style="border-left-color:#3b5bdb">' + esc(p.abstractEn) + '</div>');
+      html.push('</div>');
+    }
+
+    // 引用格式
+    if (p.citations) {
+      html.push('<div class="sec"><h2>引用格式</h2>');
+      [['GB/T 7714', p.citations.gbt7714, 'gbt'], ['APA 7th', p.citations.apa, 'apa']].forEach(function (c) {
+        if (!c[1]) return;
+        html.push('<div class="cite"><div class="lbl">' + c[0] + '</div><pre>' + esc(c[1]) + '</pre>' +
+          '<div class="acts"><button class="b" data-act="copy-cite-' + c[2] + '">复制</button></div></div>');
+      });
+      if (p.citations.bibtex) {
+        html.push('<div class="cite"><div class="lbl">BibTeX</div><pre>' + esc(p.citations.bibtex) + '</pre>' +
+          '<div class="acts"><button class="b" data-act="copy-cite-bibtex">复制</button></div></div>');
+      }
+      html.push('</div>');
+    }
+  }
+
+  /* ---------------------- 招聘渲染 ---------------------- */
+
+  function renderRecruit(f, chips, html, result) {
     if (f.org) chips.push('<span class="chip">' + esc(f.org.value) + '</span>');
     if (f.batch) chips.push('<span class="chip info">' + esc(f.batch.value) + '</span>');
     if (f.recruitType) chips.push('<span class="chip info">' + esc(f.recruitType.value) + '</span>');
     if (f.deadline) chips.push('<span class="chip warn">截止 ' + esc(f.deadline.value) + '</span>');
-    if (result.links.best) chips.push('<span class="chip">' + esc(result.links.best.host) + '</span>');
-    sh.querySelector('.chips').innerHTML = chips.join('');
 
-    var html = [];
-
-    // 投递入口
     html.push('<div class="sec"><h2>投递入口</h2>');
-    if (result.links.apply.length) {
-      result.links.apply.forEach(function (l, i) {
+    var primary = result.links.primary || result.links.apply || [];
+    if (primary.length) {
+      primary.forEach(function (l, i) {
         html.push(
           '<div class="link' + (i === 0 ? ' best' : '') + '">' +
           '<a class="u" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer">' + esc(l.url) + '</a>' +
-          '<div class="r">' + esc(F.kindLabel(l.kind)) + '　评分 ' + l.score +
+          '<div class="r">' + esc(root.WJE.format.kindLabel(l.kind)) + '　评分 ' + l.score +
           (l.reasons && l.reasons.length ? '　·　' + esc(l.reasons.slice(0, 2).join('；')) : '') + '</div>' +
           '<div class="acts">' +
           '<button class="b primary" data-act="open" data-url="' + esc(l.url) + '">打开</button>' +
@@ -1941,17 +3816,6 @@
     }
     html.push('</div>');
 
-    // 阅读原文
-    if (result.links.readOriginal) {
-      html.push('<div class="sec"><h2>阅读原文跳转</h2>' +
-        '<div class="link"><a class="u" href="' + esc(result.links.readOriginal.url) + '" target="_blank" rel="noopener noreferrer">' +
-        esc(result.links.readOriginal.url) + '</a>' +
-        '<div class="r">来源：' + esc(result.links.readOriginal.from) + '</div>' +
-        '<div class="acts"><button class="b" data-act="copy-url" data-url="' + esc(result.links.readOriginal.url) + '">复制链接</button></div>' +
-        '</div></div>');
-    }
-
-    // 字段表
     var rows = [];
     var push = function (k, v, conf) {
       if (v === undefined || v === null || v === '') return;
@@ -1970,36 +3834,39 @@
     push('招聘人数', f.headcount && String(f.headcount.value));
     push('联系方式', f.contacts && [].concat(f.contacts.emails, f.contacts.phones).join('　'));
     if (rows.length) html.push('<div class="sec"><h2>关键字段</h2><table class="kv">' + rows.join('') + '</table></div>');
+  }
 
-    // 告警
-    if (result.warnings.length) {
-      html.push('<div class="sec"><h2>提示</h2>' +
-        result.warnings.map(function (w) { return '<div class="warn">⚠️ ' + esc(w) + '</div>'; }).join('') + '</div>');
+  /* ---------------------- 通用渲染 ---------------------- */
+
+  function renderGeneral(f, chips, html) {
+    if (f.org) chips.push('<span class="chip">' + esc(f.org.value) + '（推测）</span>');
+    if (f.timeline && f.timeline.length) chips.push('<span class="chip info">' + f.timeline.length + ' 个日期</span>');
+
+    html.push('<div class="sec"><h2>主要链接</h2>');
+    var primary = state.result.links.primary || [];
+    if (primary.length) {
+      primary.forEach(function (l, i) {
+        html.push('<div class="link' + (i === 0 ? ' best' : '') + '">' +
+          '<a class="u" href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer">' + esc(l.url) + '</a>' +
+          '<div class="r">' + esc(root.WJE.format.kindLabel(l.kind)) + '　评分 ' + l.score + '</div>' +
+          '<div class="acts"><button class="b" data-act="copy-url" data-url="' + esc(l.url) + '">复制链接</button></div></div>');
+      });
+    } else {
+      html.push('<div class="empty">未识别到明确链接。</div>');
     }
+    html.push('</div>');
 
-    // 关键句
-    if (result.keySentences.length) {
-      html.push('<div class="sec"><h2>关键句摘录</h2>' +
-        result.keySentences.slice(0, 8).map(function (s) { return '<p class="quote">' + esc(s) + '</p>'; }).join('') + '</div>');
-    }
-
-    // 图片（图片型推文时最关键）
-    if (result.meta.articleKind !== 'text' && result.images.length) {
-      html.push('<div class="sec"><h2>正文图片（' + result.meta.imageCount + '）</h2><div class="imgs">' +
-        result.images.slice(0, 12).map(function (im) {
-          return '<img src="' + esc(im.src) + '" alt="' + esc(im.alt || '') + '" data-act="zoom" data-url="' + esc(im.src) + '" loading="lazy">';
-        }).join('') + '</div></div>');
-    }
-
-    sh.querySelector('.bd').innerHTML = html.join('');
-
-    sh.querySelector('.ft').innerHTML =
-      '<button class="b primary" data-act="copy-md">复制 Markdown</button>' +
-      '<button class="b" data-act="copy-json">复制 JSON</button>' +
-      '<button class="b" data-act="copy-links">只复制投递链接</button>' +
-      '<button class="b" data-act="dl-md">下载 .md</button>' +
-      '<button class="b" data-act="dl-json">下载 .json</button>' +
-      '<button class="b" data-act="highlight">高亮正文关键词</button>';
+    var rows = [];
+    var push = function (k, v) {
+      if (v === undefined || v === null || v === '') return;
+      rows.push('<tr><td class="k">' + k + '</td><td class="v">' + esc(v) + '</td></tr>');
+    };
+    push('疑似主体', f.org && f.org.value);
+    push('主办/来源', f.organizer && f.organizer.value);
+    push('事件类型', f.events && f.events.list.join('、'));
+    push('联系方式', f.contacts && [].concat(f.contacts.emails || [], f.contacts.phones || []).join('　'));
+    push('文中日期', f.timeline && f.timeline.map(function (d) { return d.value; }).slice(0, 8).join('、'));
+    if (rows.length) html.push('<div class="sec"><h2>通用字段</h2><table class="kv">' + rows.join('') + '</table></div>');
   }
 
   function onBodyClick(ev) {
@@ -2022,15 +3889,30 @@
 
     if (act === 'copy-md') copy(F.toMarkdown(res), 'Markdown 已复制');
     else if (act === 'copy-json') copy(F.toJSON(res), 'JSON 已复制');
-    else if (act === 'copy-links') copy(F.toLinkList(res), '投递链接已复制');
+    else if (act === 'copy-links') copy(F.toLinkList(res), '链接已复制');
     else if (act === 'dl-md') download(base + '.md', F.toMarkdown(res), 'text/markdown;charset=utf-8');
     else if (act === 'dl-json') download(base + '.json', F.toJSON(res), 'application/json;charset=utf-8');
     else if (act === 'highlight') highlight();
+    else if (act === 'copy-cite') copy(F.toCitation(res, 'gbt7714'), 'GB/T 7714 引用已复制');
+    else if (act === 'copy-apa') copy(F.toCitation(res, 'apa'), 'APA 引用已复制');
+    else if (act === 'copy-bibtex') copy(F.toCitation(res, 'bibtex'), 'BibTeX 已复制');
+    else if (act === 'copy-card') copy(F.toPaperCard(res), '题录已复制');
+    else if (act === 'copy-cite-gbt') copy(F.toCitation(res, 'gbt7714'), 'GB/T 7714 引用已复制');
+    else if (act === 'copy-cite-apa') copy(F.toCitation(res, 'apa'), 'APA 引用已复制');
+    else if (act === 'copy-cite-bibtex') copy(F.toCitation(res, 'bibtex'), 'BibTeX 已复制');
   }
 
-  /** 在正文里高亮关键词，便于快速定位投递信息。 */
+  /** 在正文里高亮关键词，便于快速定位关键信息。关键词随画像变化。 */
   function highlight() {
-    var RE = /(投递|网申|报名|截止|阅读原文|招聘官网|投递方式|投递入口|简历投递|申请|官网|二维码)/g;
+    var profile = state.result && state.result.detection ? state.result.detection.activeProfile : 'recruit';
+    var RE;
+    if (profile === 'literature') {
+      RE = /(DOI|doi|arXiv|PMID|作者|期刊|发表|影响因子|分区|摘要|关键词|引用|原文|全文|PDF|通讯作者|第一作者|参考文献|课题组|单位|阅读原文)/g;
+    } else if (profile === 'general') {
+      RE = /(来源|原文|阅读原文|链接|作者|时间|地点|联系|电话|邮箱|详情|报名|截止)/g;
+    } else {
+      RE = /(投递|网申|报名|截止|阅读原文|招聘官网|投递方式|投递入口|简历投递|申请|官网|二维码|联系方式)/g;
+    }
     var box = document.querySelector('#js_content') || document.querySelector('.rich_media_content');
     if (!box) { toast('未找到正文容器'); return; }
     var n = 0;
@@ -2089,17 +3971,18 @@
     var fab = state.shadow.querySelector('.fab');
     if (fab) {
       fab.classList.toggle('busy', b);
-      fab.textContent = b ? '⏳ 提取中…' : '🔍 提取招聘信息';
+      fab.textContent = b ? '⏳ 提取中…' : '🔍 提取关键信息';
     }
   }
 
   function extractAndShow() {
     ensureHost();
     setBusy(true);
-    // 抓取前先展开被折叠的正文，避免漏内容
     expandCollapsed();
     setTimeout(function () {
-      var res = root.WJE.extract.fromDocument(document, { pageUrl: location.href, keepRaw: false });
+      var opts = { pageUrl: location.href, keepRaw: false };
+      if (state.forceProfile) opts.forceProfile = state.forceProfile;
+      var res = root.WJE.extract.fromDocument(document, opts);
       setBusy(false);
       show(res);
     }, 60);

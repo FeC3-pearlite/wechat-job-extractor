@@ -33,7 +33,15 @@ function check(name, fn) {
 }
 function ok(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 function eq(a, b, m) { if (a !== b) throw new Error((m || 'not equal') + ': expected ' + JSON.stringify(b) + ', got ' + JSON.stringify(a)); }
-function includes(arr, v, m) { if (!Array.isArray(arr) || arr.indexOf(v) === -1) throw new Error((m || 'missing') + ': ' + v + ' in ' + JSON.stringify(arr)); }
+// 同时支持数组（成员判定）与字符串（子串判定）
+function includes(haystack, needle, m) {
+  const found = Array.isArray(haystack)
+    ? haystack.indexOf(needle) !== -1
+    : String(haystack).indexOf(needle) !== -1;
+  if (!found) {
+    throw new Error((m || 'missing') + ': ' + needle + '\n      in: ' + JSON.stringify(haystack).slice(0, 400));
+  }
+}
 
 const browser = EDGE_CANDIDATES.find((p) => fs.existsSync(p));
 if (!browser) {
@@ -42,7 +50,12 @@ if (!browser) {
 }
 console.log('浏览器: ' + browser + '\n');
 
-const MODULES = ['src/core/rules.js', 'src/core/parse.js', 'src/core/fields.js', 'src/core/format.js', 'src/core/extract.js'];
+const MODULES = [
+  'src/core/rules.js', 'src/core/classify.js', 'src/core/profiles/literature.js',
+  'src/core/parse.js', 'src/core/links.js', 'src/core/insights.js',
+  'src/core/profiles/recruit.js', 'src/core/profiles/general.js',
+  'src/core/fields.js', 'src/core/format.js', 'src/core/extract.js'
+];
 
 const RUNNER = `
 <script>
@@ -72,6 +85,14 @@ const RUNNER = `
       majors: res.fields.majors && res.fields.majors.list,
       positions: res.fields.positions && res.fields.positions.list,
       emails: res.fields.contacts && res.fields.contacts.emails,
+      type: res.detection && res.detection.activeProfile,
+      paperTitle: res.fields.paper && res.fields.paper.title,
+      paperTitleEn: res.fields.paper && res.fields.paper.titleEn,
+      paperDoi: res.fields.paper && res.fields.paper.doi,
+      paperJournal: res.fields.paper && res.fields.paper.journal,
+      paperYear: res.fields.paper && res.fields.paper.year,
+      paperAuthors: res.fields.paper && res.fields.paper.authors,
+      paperCitation: res.fields.paper && res.fields.paper.citations && res.fields.paper.citations.gbt7714,
       warningCount: res.warnings.length
     };
   } catch (e) {
@@ -215,9 +236,36 @@ check('两条解析路径在关键字段上完全一致（华夏）', () => {
   eq(hxb.best, stringPath.links.best.url, '投递入口');
 });
 
+/* --------------------- 文献推送：真实 DOM 路径 --------------------- */
+
+const litFile = buildHarness('literature-nature.html', '_tmp_harness_lit.html');
+let lit = null;
+
+check('真实 DOM 下自动判别为文献并抽出论文元数据', () => {
+  lit = runHeadless(litFile);
+  ok(lit.ok, '执行出错: ' + lit.error);
+  eq(lit.type, 'literature', '应判为文献画像');
+  eq(lit.paperTitleEn, 'Highly accurate protein structure prediction with AlphaFold');
+  eq(lit.paperDoi, '10.1038/s41586-021-03819-2');
+  eq(lit.paperJournal, 'Nature');
+  eq(lit.paperYear, 2021);
+});
+
+check('真实 DOM 下作者与 GB/T 引用正确', () => {
+  eq(lit.paperAuthors.length, 6);
+  includes(lit.paperAuthors, 'Jumper, J.');
+  ok(lit.paperCitation.indexOf('Jumper J, Evans R, Pritzel A, et al.') === 0, '引用开头错误: ' + lit.paperCitation);
+  includes(lit.paperCitation, 'Nature, 2021, 596(7873): 583-589');
+});
+
+check('真实 DOM 下原文链接优先 DOI 解析页', () => {
+  eq(lit.bestHost, 'doi.org');
+  eq(lit.readOriginal, 'https://doi.org/10.1038/s41586-021-03819-2');
+});
+
 /* ------------------------------ 清理 ------------------------------ */
 
-['_tmp_harness_citic.html', '_tmp_harness_ceb.html', '_tmp_harness_hxb.html'].forEach((f) => {
+['_tmp_harness_citic.html', '_tmp_harness_ceb.html', '_tmp_harness_hxb.html', '_tmp_harness_lit.html'].forEach((f) => {
   try { fs.unlinkSync(path.join(__dirname, f)); } catch (e) { /* 忽略 */ }
 });
 
