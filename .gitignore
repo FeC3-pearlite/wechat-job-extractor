@@ -18,3 +18,6 @@ desktop.ini
 *.swp
 .idea/
 .vscode/
+
+# 打包产物：crx 无法从商店外安装，且需私钥维持 ID，不入库
+*.crx

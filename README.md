@@ -31,10 +31,17 @@
 ### 方式 B：油猴脚本（零安装成本，Chrome/Edge/Firefox 通用）
 
 1. 先装 [Tampermonkey](https://www.tampermonkey.net/) 或 Violentmonkey
-2. 打开扩展面板 → **添加新脚本**，把 `dist/wechat-job-extractor.user.js` 的内容整个粘贴进去 → 保存
+2. 三种装法任选：
+   - **一键安装（推荐）**：浏览器打开 [`dist/wechat-job-extractor.user.js`](https://raw.githubusercontent.com/FeC3-pearlite/wechat-job-extractor/main/dist/wechat-job-extractor.user.js)，Tampermonkey 会自动弹出安装页
+   - **从仓库安装**：在 Tampermonkey 里新建脚本 → 粘贴该文件内容 → 保存
+   - **本地安装**：直接用本目录 `dist/wechat-job-extractor.user.js`
 3. 打开微信文章页，右下角同样会出现提取按钮
 
+脚本已配置 `@updateURL`，之后我更新仓库时 Tampermonkey 会自动提示升级。
+
 两种方式共用同一套提取引擎（`src/core/`），结果完全一致。
+
+> 项目地址：https://github.com/FeC3-pearlite/wechat-job-extractor
 
 ---
 

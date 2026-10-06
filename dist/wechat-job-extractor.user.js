@@ -1,11 +1,15 @@
 // ==UserScript==
 // @name         微信求职信息提取器
-// @namespace    https://github.com/local/wechat-job-extractor
+// @namespace    https://github.com/FeC3-pearlite/wechat-job-extractor
 // @version      1.0.0
 // @description  从微信公众号招聘推文里一键提取招聘单位、届别、岗位、投递截止时间与官方投递链接，可复制/下载 Markdown、JSON。
-// @author       local
+// @author       FeC3-pearlite
 // @match        https://mp.weixin.qq.com/s*
 // @icon         data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2307c160'/%3E%3C/svg%3E
+// @homepageURL  https://github.com/FeC3-pearlite/wechat-job-extractor
+// @supportURL   https://github.com/FeC3-pearlite/wechat-job-extractor/issues
+// @updateURL    https://raw.githubusercontent.com/FeC3-pearlite/wechat-job-extractor/main/dist/wechat-job-extractor.user.js
+// @downloadURL  https://raw.githubusercontent.com/FeC3-pearlite/wechat-job-extractor/main/dist/wechat-job-extractor.user.js
 // @grant        none
 // @run-at       document-idle
 // @license      MIT
